@@ -1,0 +1,1067 @@
+#!/usr/bin/env python3
+"""
+Agentic Conical Intersection Search Pipeline
+=============================================
+Runs entirely on Frontier (no internet required).
+Uses Qwen3-8B on MI250X GPU for agent decisions.
+Uses RANGE + GAMESS SF-TDDFT for quantum chemistry.
+
+Usage:
+    sbatch run_agent.sh
+
+Or interactively on a compute node:
+    salloc -A CHM238 -N1 -t 2:00:00 -p batch
+    module load cray-python rocm
+    export PYTHONPATH=/ccs/proj/chm238/fzahari/python_libs:$PYTHONPATH
+    python3 agent_ci_pipeline.py --molecule ethylene
+"""
+
+import os
+import sys
+import time
+import glob
+import json
+import shutil
+import argparse
+import subprocess
+from pathlib import Path
+import numpy as np
+
+# ============================================================
+# Configuration
+# ============================================================
+PROJ_DIR = '/ccs/proj/chm238/fzahari'
+MODEL_PATH = f'{PROJ_DIR}/models/qwen3-8b'
+SETUP_LLM = f'{PROJ_DIR}/setup_llm.py'
+GAMESS_PATH = os.path.expanduser('~/gamess_gnu_Apr01_2026')
+RANGE_DIR = os.path.expanduser('~/Programs/RANGE')
+WORK_DIR = os.path.expanduser('~/Programs/RANGE/examples/GAMESS_calc')
+HA_TO_EV = 27.2114
+
+# Cost types for PES mapping
+OBJECTIVES = {
+    'e_s0':   'Ground-state minimum (lowest E_S0)',
+    'e_s1':   'Excited-state minimum (lowest E_S1)',
+    'somaki': 'Conical intersection (Somaki cost function)',
+}
+
+
+class AgentLog:
+    """Simple logger that prints and saves to file."""
+    def __init__(self, logfile):
+        self.logfile = logfile
+        self.entries = []
+
+    def log(self, msg, level='INFO'):
+        timestamp = time.strftime('%H:%M:%S')
+        entry = f'[{timestamp}] [{level}] {msg}'
+        print(entry)
+        self.entries.append(entry)
+        with open(self.logfile, 'a') as f:
+            f.write(entry + '\n')
+
+
+class LocalLLM:
+    """Qwen3-8B running on AMD MI250X GPU."""
+
+    def __init__(self, logger):
+        self.logger = logger
+        self.model = None
+        self.tokenizer = None
+
+    def load(self):
+        """Load model onto GPU. Must be called on compute node."""
+        self.logger.log('Loading Qwen3-8B onto MI250X GPU...')
+
+        # Block torchvision (CUDA version conflicts with ROCm torch)
+        sys.path.insert(0, os.path.dirname(SETUP_LLM))
+        import setup_llm  # noqa: F401
+
+        import torch
+        device_name = torch.cuda.get_device_name(0)
+        self.logger.log(f'GPU: {device_name}, {torch.cuda.device_count()} devices')
+
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        t0 = time.time()
+        self.model = AutoModelForCausalLM.from_pretrained(
+            MODEL_PATH, torch_dtype=torch.float16
+        ).to('cuda:0')
+        self.tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+        self.logger.log(f'Model loaded in {time.time()-t0:.1f}s')
+
+    def ask(self, prompt, max_tokens=500):
+        """Ask the LLM a question and return the response."""
+        if self.model is None:
+            return "[LLM not loaded - using rule-based fallback]"
+
+        import torch
+        inputs = self.tokenizer(prompt, return_tensors='pt').to('cuda:0')
+        t0 = time.time()
+        with torch.no_grad():
+            output = self.model.generate(
+                **inputs,
+                max_new_tokens=max_tokens,
+                temperature=0.3,
+                do_sample=True,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )
+        response = self.tokenizer.decode(output[0][inputs['input_ids'].shape[1]:],
+                                          skip_special_tokens=True)
+        dt = time.time() - t0
+        n_tok = output.shape[1] - inputs['input_ids'].shape[1]
+        self.logger.log(f'LLM response: {n_tok} tokens in {dt:.1f}s ({n_tok/dt:.1f} tok/s)')
+        return response.strip()
+
+
+def parse_sf_ci_results(results_dir):
+    """Parse all sf_ci_info.txt files from a RANGE run."""
+    records = []
+    rdir = Path(results_dir)
+    if not rdir.exists():
+        return records
+
+    for job_dir in sorted(rdir.iterdir()):
+        info = job_dir / 'sf_ci_info.txt'
+        xyz = job_dir / 'final.xyz'
+        if info.exists() and info.stat().st_size > 0:
+            data = {'dir': str(job_dir), 'name': job_dir.name}
+            for line in info.read_text().splitlines():
+                if '=' in line:
+                    key, val = line.split('=', 1)
+                    key = key.strip()
+                    val = val.strip().split()[0]
+                    try:
+                        data[key] = float(val)
+                    except ValueError:
+                        data[key] = val
+            if 'E_S0' in data and 'E_S1' in data and 'Gap' in data:
+                data['gap_ev'] = data['Gap'] * HA_TO_EV
+                data['xyz'] = str(xyz) if xyz.exists() else None
+                records.append(data)
+
+    return records
+
+
+def run_range_objective(cost_type, molecule_name, logger, force=False):
+    """Run a single RANGE search with a given cost objective."""
+    results_dir = f'results_{molecule_name}_{cost_type}'
+
+    if os.path.exists(results_dir) and not force:
+        n_existing = len(list(Path(results_dir).iterdir()))
+        if n_existing > 10:
+            logger.log(f'  {cost_type}: {results_dir}/ already has {n_existing} results, skipping (use --force to extend)')
+            return results_dir
+        else:
+            logger.log(f'  {cost_type}: removing incomplete {results_dir}/ ({n_existing} jobs)')
+            shutil.rmtree(results_dir)
+
+    # Create inbox script by modifying the base template for this molecule
+    template_path = os.path.join(WORK_DIR, f'inbox_{molecule_name}_sf_ci.py')
+    if not os.path.exists(template_path):
+        # Fallback to ethylene template
+        template_path = os.path.join(WORK_DIR, 'inbox_ethylene_sf_ci.py')
+    inbox_path = os.path.join(WORK_DIR, f'inbox_{molecule_name}_{cost_type}.py')
+
+    if not os.path.exists(inbox_path):
+        text = Path(template_path).read_text()
+        # Add cost_type parameter
+        if "'cost_type'" not in text:
+            text = text.replace("'alpha': 0.02,",
+                               f"'alpha': 0.02, 'cost_type': '{cost_type}',")
+        # Update output directory
+        import re
+        text = re.sub(r"results_\w+_sf_ci", results_dir, text)
+        Path(inbox_path).write_text(text)
+
+    logger.log(f'  {cost_type}: running RANGE -> {results_dir}/')
+    t0 = time.time()
+
+    result = subprocess.run(
+        ['python3', inbox_path],
+        capture_output=True, text=True, cwd=WORK_DIR
+    )
+
+    dt = time.time() - t0
+    n_jobs = len(list(Path(os.path.join(WORK_DIR, results_dir)).iterdir())) if os.path.exists(os.path.join(WORK_DIR, results_dir)) else 0
+    logger.log(f'  {cost_type}: completed {n_jobs} evaluations in {dt:.0f}s')
+
+    if result.returncode != 0:
+        # Log last few lines of stderr
+        err_lines = result.stderr.strip().split('\n')[-5:]
+        for line in err_lines:
+            logger.log(f'  {cost_type} ERR: {line}', level='WARN')
+
+    return results_dir
+
+
+def build_results_summary(all_results, logger):
+    """Build a structured summary of results across all objectives."""
+    summary = {}
+
+    for obj_name, records in all_results.items():
+        if not records:
+            summary[obj_name] = {'n_calcs': 0}
+            continue
+
+        # Sort by relevant metric
+        if obj_name == 'e_s0':
+            records.sort(key=lambda r: r['E_S0'])
+            best = records[0]
+            summary[obj_name] = {
+                'n_calcs': len(records),
+                'best_e_s0': best['E_S0'],
+                'gap_at_best': best['gap_ev'],
+                'best_dir': best['name'],
+                'best_xyz': best.get('xyz'),
+            }
+        elif obj_name == 'e_s1':
+            records.sort(key=lambda r: r['E_S1'])
+            best = records[0]
+            summary[obj_name] = {
+                'n_calcs': len(records),
+                'best_e_s1': best['E_S1'],
+                'gap_at_best': best['gap_ev'],
+                'best_dir': best['name'],
+                'best_xyz': best.get('xyz'),
+            }
+        elif obj_name in ('somaki', 'gap', 's1_near_ci'):
+            records.sort(key=lambda r: r['gap_ev'])
+            best = records[0]
+            summary[obj_name] = {
+                'n_calcs': len(records),
+                'best_gap_ev': best['gap_ev'],
+                'e_s0_at_best': best['E_S0'],
+                'e_s1_at_best': best['E_S1'],
+                'best_dir': best['name'],
+                'best_xyz': best.get('xyz'),
+            }
+
+        # Count low-gap structures
+        n_low_gap = sum(1 for r in records if r['gap_ev'] < 0.1)
+        summary[obj_name]['n_low_gap'] = n_low_gap
+
+    return summary
+
+
+def format_summary_for_llm(summary, molecule_name):
+    """Format results summary as a prompt for the LLM."""
+    lines = [
+        f"You are a computational photochemist analyzing SF-TDDFT results for {molecule_name}.",
+        f"Three RANGE searches were run with different cost objectives.",
+        f"Here are the results:\n",
+    ]
+
+    for obj_name, data in summary.items():
+        n = data.get('n_calcs', 0)
+        if n == 0:
+            lines.append(f"  {obj_name}: No results (RANGE failed)")
+            continue
+
+        if obj_name == 'e_s0':
+            lines.append(f"  e_s0 (ground-state minimum): {n} calcs, "
+                        f"best E(S0) = {data['best_e_s0']:.6f} Ha, "
+                        f"gap at best = {data['gap_at_best']:.4f} eV")
+        elif obj_name == 'e_s1':
+            lines.append(f"  e_s1 (excited-state minimum): {n} calcs, "
+                        f"best E(S1) = {data['best_e_s1']:.6f} Ha, "
+                        f"gap at best = {data['gap_at_best']:.4f} eV")
+        elif obj_name == 'somaki':
+            lines.append(f"  somaki (CI search): {n} calcs, "
+                        f"best gap = {data['best_gap_ev']:.4f} eV, "
+                        f"E(S0) = {data['e_s0_at_best']:.6f} Ha")
+
+        lines.append(f"    Low-gap structures (< 0.1 eV): {data.get('n_low_gap', 0)}")
+
+    lines.append("\nBased on these results, answer these questions:")
+    lines.append("1. Is the best CI gap small enough (< 0.1 eV) to submit for CONICAL refinement?")
+    lines.append("2. Does the S1 minimum coincide with the CI (gap < 0.1 eV at S1 minimum)?")
+    lines.append("3. Is the S0 minimum in a physically reasonable region (large gap, lowest energy)?")
+    lines.append("4. What is the overall assessment of the photochemical landscape?")
+    lines.append("5. Should we proceed to CONICAL refinement, or rerun RANGE with different parameters?")
+    lines.append("\nRespond concisely with your assessment and recommended actions.")
+
+    return '\n'.join(lines)
+
+
+def submit_conical(xyz_file, job_name, molecule_name, logger):
+    """Prepare and run GAMESS CONICAL refinement.
+
+    Reads the molecule's SF-TDDFT template to extract MULT, ICHARG, BASIS,
+    MWORDS, MEMDDI, MAXIT, and TDDFT settings, then generates a CONICAL
+    input with RUNTYP=CONICAL.  No more ethylene-hardcoded settings.
+    """
+    conical_dir = os.path.join(WORK_DIR, f'conical_{job_name}')
+    os.makedirs(conical_dir, exist_ok=True)
+
+    # --- Locate and parse the molecule's GAMESS template ---
+    # Convention: input_gamess_{molecule}_sf_tddft_template
+    # Ethylene uses input_gamess_sf_tddft_template (no molecule tag)
+    if molecule_name == 'ethylene':
+        template_candidates = [
+            os.path.join(WORK_DIR, 'input_gamess_sf_tddft_template'),
+        ]
+    else:
+        template_candidates = [
+            os.path.join(WORK_DIR, f'input_gamess_{molecule_name}_sf_tddft_template'),
+        ]
+
+    template_path = None
+    for tc in template_candidates:
+        if os.path.exists(tc):
+            template_path = tc
+            break
+
+    if template_path is None:
+        logger.log(f'  ERROR: No GAMESS template found for {molecule_name}. '
+                   f'Tried: {template_candidates}', level='ERROR')
+        return {'success': False, 'error': 'No template found'}
+
+    template_text = Path(template_path).read_text()
+    logger.log(f'  Using template: {template_path}')
+
+    # Extract key parameters from template via simple parsing
+    import re
+
+    def extract_kw(text, group, keyword):
+        """Extract keyword value from GAMESS input group."""
+        # Match KEYWORD=VALUE within $GROUP ... $END (handles multi-line groups)
+        pattern = rf'\${group}\b(.*?)\$END'
+        m = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+        if not m:
+            return None
+        block = m.group(1)
+        kw_pat = rf'{keyword}\s*=\s*(\S+)'
+        km = re.search(kw_pat, block, re.IGNORECASE)
+        return km.group(1) if km else None
+
+    contrl_mult = extract_kw(template_text, 'CONTRL', 'MULT') or '3'
+    contrl_icharg = extract_kw(template_text, 'CONTRL', 'ICHARG') or '0'
+    contrl_maxit = extract_kw(template_text, 'CONTRL', 'MAXIT') or '100'
+    contrl_scftyp = extract_kw(template_text, 'CONTRL', 'SCFTYP') or 'ROHF'
+    contrl_pp = extract_kw(template_text, 'CONTRL', 'PP') or ''
+    sys_mwords = extract_kw(template_text, 'SYSTEM', 'MWORDS') or '200'
+    sys_memddi = extract_kw(template_text, 'SYSTEM', 'MEMDDI') or '100'
+    tddft_mult = extract_kw(template_text, 'TDDFT', 'MULT') or '1'
+    tddft_nstate = extract_kw(template_text, 'TDDFT', 'NSTATE') or '5'
+
+    # Extract entire $BASIS group (handles both GBASIS=N31 NGAUSS=... and GBASIS=SBKJC)
+    basis_match = re.search(r'(\$BASIS\b.*?\$END)', template_text, re.DOTALL | re.IGNORECASE)
+    basis_group = basis_match.group(1).strip() if basis_match else ' $BASIS  GBASIS=N31 NGAUSS=6 NDFUNC=1 NPFUNC=1 $END'
+
+    # --- Build geometry ---
+    lines = Path(xyz_file).read_text().splitlines()
+    natoms = int(lines[0])
+    atomic_numbers = {
+        'H': 1.0, 'He': 2.0, 'Li': 3.0, 'Be': 4.0, 'B': 5.0,
+        'C': 6.0, 'N': 7.0, 'O': 8.0, 'F': 9.0, 'Ne': 10.0,
+        'Na': 11.0, 'Si': 14.0, 'P': 15.0, 'S': 16.0, 'Cl': 17.0,
+        'Cu': 29.0, 'Zn': 30.0, 'Ag': 47.0, 'Au': 79.0, 'Ce': 58.0,
+    }
+    data_lines = []
+    for line in lines[2:2 + natoms]:
+        parts = line.split()
+        elem = parts[0]
+        x, y, z = parts[1], parts[2], parts[3]
+        znuc = atomic_numbers.get(elem, 0.0)
+        if znuc == 0.0:
+            logger.log(f'  WARNING: Unknown element {elem}, using Z=0.0', level='WARN')
+        data_lines.append(f' {elem}    {znuc:.1f}    {x}    {y}    {z}')
+
+    inp_text = f""" $CONTRL SCFTYP={contrl_scftyp} RUNTYP=CONICAL TDDFT=SPNFLP
+         DFTTYP=BHHLYP ISPHER=1{" PP="+contrl_pp if contrl_pp else ""} MULT={contrl_mult} MAXIT={contrl_maxit} ICHARG={contrl_icharg} $END
+ $SYSTEM MWORDS={sys_mwords} MEMDDI={sys_memddi} $END
+ {basis_group}
+ $TDDFT  NSTATE={tddft_nstate} TAMMD=.TRUE. MULT={tddft_mult} $END
+ $CONICL OPTTYP=BPUPD IXROOT(1)=1,2 $END
+ $DATA
+CONICAL from RANGE CI candidate {job_name}
+C1
+{chr(10).join(data_lines)}
+ $END
+"""
+
+    inp_file = os.path.join(conical_dir, 'conical.inp')
+    Path(inp_file).write_text(inp_text)
+
+    # Clean GAMESS scratch
+    scratch_dir = os.path.expanduser('~/gamess/restart')
+    if os.path.isdir(scratch_dir):
+        for ext in ['.dat', '.F05', '.F08', '.F10', '.trj', '.rst']:
+            sf = os.path.join(scratch_dir, f'conical{ext}')
+            if os.path.exists(sf):
+                os.remove(sf)
+
+    logger.log(f'  Running CONICAL refinement: {conical_dir}/')
+    t0 = time.time()
+
+    result = subprocess.run(
+        f'{GAMESS_PATH}/rungms-dev conical 00 1 > conical.log',
+        shell=True, cwd=conical_dir, capture_output=True, text=True
+    )
+
+    dt = time.time() - t0
+    logger.log(f'  CONICAL completed in {dt:.0f}s')
+
+    # Parse CONICAL result
+    log_file = os.path.join(conical_dir, 'conical.log')
+    conical_result = {'success': False, 'time': dt}
+    if os.path.exists(log_file):
+        log_text = Path(log_file).read_text()
+        if 'TERMINATED NORMALLY' in log_text:
+            conical_result['success'] = True
+            # Look for final gap
+            for line in log_text.splitlines():
+                if 'ENERGY GAP' in line.upper() or 'FINAL' in line:
+                    conical_result['final_line'] = line.strip()
+            # Parse SF-TDDFT summary from CONICAL output
+            in_summary = False
+            sf_abs = []
+            for line in log_text.splitlines():
+                if 'SUMMARY OF SPIN-FLIP RESULTS' in line:
+                    in_summary = True
+                    sf_abs = []
+                    continue
+                if not in_summary:
+                    continue
+                if '(REFERENCE STATE)' in line:
+                    continue
+                if 'DONE WITH' in line or 'SELECTING' in line:
+                    in_summary = False
+                    continue
+                parts = line.split()
+                if len(parts) >= 5:
+                    try:
+                        int(parts[0])
+                        abs_e = float(parts[2])
+                        s2 = float(parts[4])
+                        sf_abs.append((abs_e, s2))
+                    except (ValueError, IndexError):
+                        pass
+            if len(sf_abs) >= 2:
+                sf_abs.sort(key=lambda x: x[0])
+                e_s0 = sf_abs[0][0]
+                e_s1 = sf_abs[1][0]
+                gap = (e_s1 - e_s0) * HA_TO_EV
+                conical_result['e_s0'] = e_s0
+                conical_result['e_s1'] = e_s1
+                conical_result['gap_ev'] = gap
+                logger.log(f'  CONICAL result: gap = {gap:.6f} eV, '
+                          f'E(S0) = {e_s0:.10f} Ha')
+
+    return conical_result
+
+
+def generate_report(molecule_name, summary, conical_results, llm_assessment, gpr_results, ts_results, logger):
+    """Generate the final report."""
+    report_file = os.path.join(WORK_DIR, f'agent_report_{molecule_name}.txt')
+
+    with open(report_file, 'w') as f:
+        f.write("=" * 70 + "\n")
+        f.write(f"  AGENTIC CI SEARCH PIPELINE REPORT: {molecule_name.upper()}\n")
+        f.write(f"  Date: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"  Platform: OLCF Frontier (AMD MI250X)\n")
+        f.write("=" * 70 + "\n\n")
+
+        f.write("PIPELINE STAGES\n")
+        f.write("-" * 40 + "\n")
+
+        total_calcs = sum(d.get('n_calcs', 0) for d in summary.values())
+        f.write(f"  Stage 1: RANGE exploration ({total_calcs} total SF-TDDFT calculations)\n")
+        for obj_name, data in summary.items():
+            n = data.get('n_calcs', 0)
+            f.write(f"    {obj_name}: {n} calculations\n")
+
+        f.write(f"\n  Stage 2: Classification\n")
+        for obj_name, data in summary.items():
+            if data.get('n_calcs', 0) == 0:
+                continue
+            if obj_name == 'e_s0':
+                f.write(f"    S0 minimum: E = {data['best_e_s0']:.6f} Ha, "
+                       f"gap = {data['gap_at_best']:.4f} eV\n")
+            elif obj_name == 'e_s1':
+                f.write(f"    S1 minimum: E = {data['best_e_s1']:.6f} Ha, "
+                       f"gap = {data['gap_at_best']:.4f} eV\n")
+            elif obj_name == 'somaki':
+                f.write(f"    CI candidate: gap = {data['best_gap_ev']:.4f} eV, "
+                       f"E(S0) = {data['e_s0_at_best']:.6f} Ha\n")
+
+        f.write(f"\n  Stage 2.5: GPR Interpolation & DBSCAN Clustering\n")
+        for obj_name, gdata in gpr_results.items():
+            if 'gpr_r2' in gdata:
+                f.write(f"    {obj_name}: GPR R² = {gdata['gpr_r2']:.4f}\n")
+            if 'clusters' in gdata:
+                f.write(f"    {obj_name}: {len(gdata['clusters'])} CI cluster(s)\n")
+                for cl in gdata['clusters']:
+                    f.write(f"      Cluster {cl['cluster_id']}: {cl['n_members']} members, "
+                           f"best gap = {cl['best_gap_ev']:.4f} eV\n")
+            if 'mep_barrier_ev' in gdata:
+                barrier = gdata['mep_barrier_ev']
+                if barrier > 0.027:  # ~1 kT
+                    f.write(f"    {obj_name}: MEP barrier estimate = {barrier:.3f} eV\n")
+                else:
+                    f.write(f"    {obj_name}: barrierless MEP\n")
+
+        f.write(f"\n  Stage 3: LLM Assessment\n")
+        for line in llm_assessment.split('\n'):
+            f.write(f"    {line}\n")
+
+        if conical_results:
+            f.write(f"\n  Stage 4: CONICAL Refinement\n")
+            for name, result in conical_results.items():
+                if result.get('gap_ev') is not None:
+                    f.write(f"    {name}: gap = {result['gap_ev']:.6f} eV, "
+                           f"E(S0) = {result['e_s0']:.10f} Ha\n")
+                elif result.get('success'):
+                    f.write(f"    {name}: completed (check log for details)\n")
+                else:
+                    f.write(f"    {name}: FAILED\n")
+
+        if ts_results:
+            f.write(f"\n  Stage 4.5: Transition States (GPR-predicted)\n")
+            for name, ts in ts_results.items():
+                f.write(f"    {name}: forward barrier = {ts['barrier_fwd_ev']:.3f} eV, "
+                       f"reverse = {ts['barrier_rev_ev']:.3f} eV "
+                       f"(GPR uncertainty: {ts['uncertainty']:.4f} Ha)\n")
+
+        # Photochemistry summary
+        f.write(f"\n\nPHOTOCHEMICAL LANDSCAPE\n")
+        f.write("-" * 40 + "\n")
+
+        s0_data = summary.get('e_s0', {})
+        s1_data = summary.get('e_s1', {})
+        ci_data = summary.get('somaki', {})
+
+        if s0_data.get('best_e_s0') and s1_data.get('best_e_s1'):
+            vert_exc = (s1_data['best_e_s1'] - s0_data['best_e_s0']) * HA_TO_EV
+            f.write(f"  Vertical excitation estimate: {vert_exc:.2f} eV\n")
+
+        if s1_data.get('best_e_s1') and ci_data.get('e_s1_at_best'):
+            barrier = (ci_data['e_s1_at_best'] - s1_data['best_e_s1']) * HA_TO_EV
+            if barrier > 0.05:
+                f.write(f"  S1 barrier to CI: {barrier:.3f} eV\n")
+            else:
+                f.write(f"  Barrierless path from S1 to CI\n")
+
+        if s1_data.get('gap_at_best', 999) < 0.1:
+            f.write(f"  NOTE: S1 minimum IS near the CI (gap = {s1_data['gap_at_best']:.4f} eV)\n")
+
+        if ts_results:
+            f.write(f"\n  Ground-state transition states:\n")
+            for name, ts in ts_results.items():
+                f.write(f"    {name}: {ts['barrier_fwd_ev']:.3f} eV forward, "
+                       f"{ts['barrier_rev_ev']:.3f} eV reverse\n")
+
+        f.write(f"\n  Total SF-TDDFT calculations: {total_calcs}\n")
+
+        f.write("\n\nFULL LOG\n")
+        f.write("-" * 40 + "\n")
+        for entry in logger.entries:
+            f.write(entry + "\n")
+
+    logger.log(f'Report saved: {report_file}')
+    return report_file
+
+
+# ============================================================
+# MAIN PIPELINE
+# ============================================================
+def main():
+    parser = argparse.ArgumentParser(description='Agentic CI Search Pipeline')
+    parser.add_argument('--molecule', default='ethylene', help='Molecule name')
+    parser.add_argument('--no-llm', action='store_true', help='Skip LLM, use rule-based decisions')
+    parser.add_argument('--force', action='store_true', help='Force RANGE to add more evaluations even if existing results present')
+    parser.add_argument('--no-conical', action='store_true', help='Skip CONICAL refinement')
+    parser.add_argument('--objectives', nargs='+', default=['e_s0', 'e_s1', 'somaki'],
+                       help='Cost objectives to run')
+    args = parser.parse_args()
+
+    os.chdir(WORK_DIR)
+
+    logger = AgentLog(os.path.join(WORK_DIR, f'agent_log_{args.molecule}.txt'))
+    logger.log("=" * 60)
+    logger.log(f"AGENTIC CI SEARCH PIPELINE: {args.molecule.upper()}")
+    logger.log("=" * 60)
+
+    # ---- Stage 0: Load LLM ----
+    llm = LocalLLM(logger)
+    if not args.no_llm:
+        try:
+            llm.load()
+        except Exception as e:
+            logger.log(f'LLM load failed: {e}. Using rule-based decisions.', level='WARN')
+
+    # ---- Stage 1: RANGE exploration ----
+    logger.log("\n=== STAGE 1: RANGE Exploration ===")
+    all_results = {}
+
+    for cost_type in args.objectives:
+        desc = OBJECTIVES.get(cost_type, cost_type)
+        logger.log(f'\nObjective: {cost_type} ({desc})')
+        results_dir = run_range_objective(cost_type, args.molecule, logger, force=args.force)
+
+        # Parse results
+        full_dir = os.path.join(WORK_DIR, results_dir)
+        records = parse_sf_ci_results(full_dir)
+        all_results[cost_type] = records
+        logger.log(f'  Parsed {len(records)} valid SF-TDDFT results')
+
+    # ---- Stage 2: Classify and summarize ----
+    logger.log("\n=== STAGE 2: Classification ===")
+    summary = build_results_summary(all_results, logger)
+
+    for obj_name, data in summary.items():
+        n = data.get('n_calcs', 0)
+        if n == 0:
+            logger.log(f'  {obj_name}: No results')
+            continue
+        if obj_name == 'e_s0':
+            logger.log(f'  S0 minimum: E = {data["best_e_s0"]:.6f} Ha, '
+                       f'gap = {data["gap_at_best"]:.4f} eV')
+        elif obj_name == 'e_s1':
+            logger.log(f'  S1 minimum: E = {data["best_e_s1"]:.6f} Ha, '
+                       f'gap = {data["gap_at_best"]:.4f} eV')
+        elif obj_name == 'somaki':
+            logger.log(f'  CI candidate: gap = {data["best_gap_ev"]:.4f} eV, '
+                       f'E(S0) = {data["e_s0_at_best"]:.6f} Ha')
+
+    # ---- Stage 2.5: GPR + DBSCAN analysis ----
+    logger.log("\n=== STAGE 2.5: GPR Interpolation & DBSCAN Clustering ===")
+    gpr_results = {}
+
+    for obj_name, records in all_results.items():
+        if len(records) < 20:
+            logger.log(f'  {obj_name}: too few records ({len(records)}) for GPR/DBSCAN')
+            continue
+
+        # Extract coordinates and cost values
+        coords_list = []
+        costs = []
+        gaps = []
+        for r in records:
+            if r.get('xyz') and os.path.exists(r['xyz']):
+                try:
+                    xyz_lines = Path(r['xyz']).read_text().splitlines()
+                    natoms = int(xyz_lines[0])
+                    flat_coords = []
+                    for line in xyz_lines[2:2 + natoms]:
+                        parts = line.split()
+                        flat_coords.extend([float(parts[1]), float(parts[2]), float(parts[3])])
+                    coords_list.append(flat_coords)
+                    costs.append(r.get('Cost_C', r.get('E_S0', 0)))
+                    gaps.append(r['gap_ev'])
+                except (ValueError, IndexError):
+                    continue
+
+        if len(coords_list) < 20:
+            logger.log(f'  {obj_name}: too few valid geometries ({len(coords_list)})')
+            continue
+
+        X = np.array(coords_list)
+        y_cost = np.array(costs)
+        y_gap = np.array(gaps)
+
+        logger.log(f'  {obj_name}: {len(X)} geometries, {X.shape[1]} coordinates')
+
+        # --- DBSCAN clustering on low-gap structures ---
+        try:
+            from sklearn.cluster import DBSCAN
+            from sklearn.preprocessing import StandardScaler
+
+            low_gap_mask = y_gap < 0.5  # eV
+            n_low = low_gap_mask.sum()
+            logger.log(f'  {obj_name}: {n_low} structures with gap < 0.5 eV')
+
+            if n_low >= 5:
+                X_low = X[low_gap_mask]
+                gaps_low = y_gap[low_gap_mask]
+
+                scaler = StandardScaler()
+                X_scaled = scaler.fit_transform(X_low)
+
+                db = DBSCAN(eps=0.8, min_samples=2).fit(X_scaled)
+                labels = db.labels_
+                n_clusters = len(set(labels) - {-1})
+                n_noise = (labels == -1).sum()
+
+                logger.log(f'  {obj_name}: DBSCAN found {n_clusters} near-CI cluster(s), '
+                          f'{n_noise} outliers')
+
+                cluster_info = []
+                for cid in range(n_clusters):
+                    mask = labels == cid
+                    cluster_gaps = gaps_low[mask]
+                    best_idx = cluster_gaps.argmin()
+                    # Map back to original records
+                    low_indices = np.where(low_gap_mask)[0]
+                    cluster_indices = low_indices[mask]
+                    best_orig_idx = cluster_indices[best_idx]
+                    best_record = records[best_orig_idx]
+
+                    info = {
+                        'cluster_id': cid,
+                        'n_members': int(mask.sum()),
+                        'best_gap_ev': float(cluster_gaps.min()),
+                        'best_dir': best_record['name'],
+                        'best_xyz': best_record.get('xyz'),
+                    }
+                    cluster_info.append(info)
+                    logger.log(f'    CI cluster {cid}: {info["n_members"]} members, '
+                              f'best gap = {info["best_gap_ev"]:.4f} eV '
+                              f'({info["best_dir"]})')
+
+                gpr_results[obj_name] = {'ci_clusters': cluster_info}
+
+        except ImportError:
+            logger.log(f'  {obj_name}: scikit-learn not available, skipping DBSCAN')
+
+        # --- GPR interpolation ---
+        try:
+            from sklearn.gaussian_process import GaussianProcessRegressor
+            from sklearn.gaussian_process.kernels import RBF, ConstantKernel
+
+            X_mean = X.mean(axis=0)
+            X_std = X.std(axis=0) + 1e-10
+            X_norm = (X - X_mean) / X_std
+
+            kernel = ConstantKernel(1.0) * RBF(length_scale=1.0)
+            gpr = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=5,
+                                           alpha=1e-6)
+            gpr.fit(X_norm, y_cost)
+            r2 = gpr.score(X_norm, y_cost)
+            logger.log(f'  {obj_name}: GPR R² = {r2:.4f}, kernel = {gpr.kernel_}')
+
+            # Predict uncertainty at CI candidates (low-gap structures)
+            if n_low >= 5:
+                X_low_norm = (X[low_gap_mask] - X_mean) / X_std
+                y_pred, y_std = gpr.predict(X_low_norm, return_std=True)
+                logger.log(f'  {obj_name}: mean prediction uncertainty at CI candidates: '
+                          f'{np.mean(y_std):.6f} Ha')
+
+            if obj_name not in gpr_results:
+                gpr_results[obj_name] = {}
+            gpr_results[obj_name]['gpr_r2'] = r2
+
+            # --- Minimum energy path estimate ---
+            # Interpolate between largest-gap (S0 min) and smallest-gap (CI) structures
+            if len(y_gap) >= 2:
+                s0_idx = np.argmax(y_gap)
+                ci_idx = np.argmin(y_gap)
+                n_path = 30
+                path_coords = np.array([
+                    X[s0_idx] + t * (X[ci_idx] - X[s0_idx])
+                    for t in np.linspace(0, 1, n_path)
+                ])
+                path_norm = (path_coords - X_mean) / X_std
+                path_cost, path_std = gpr.predict(path_norm, return_std=True)
+
+                barrier = path_cost.max() - path_cost[0]
+                logger.log(f'  {obj_name}: MEP estimate (S0 min -> CI):')
+                logger.log(f'    Cost at S0 min: {path_cost[0]:.6f} Ha')
+                logger.log(f'    Cost at CI: {path_cost[-1]:.6f} Ha')
+                logger.log(f'    Max cost along path: {path_cost.max():.6f} Ha')
+                if barrier > 0.001:
+                    logger.log(f'    Possible barrier: {barrier * HA_TO_EV:.3f} eV')
+                else:
+                    logger.log(f'    Barrierless path')
+
+                if obj_name not in gpr_results:
+                    gpr_results[obj_name] = {}
+                gpr_results[obj_name]['mep_barrier_ev'] = barrier * HA_TO_EV
+
+        except ImportError:
+            logger.log(f'  {obj_name}: scikit-learn not available, skipping GPR')
+        except Exception as e:
+            logger.log(f'  {obj_name}: GPR failed: {e}', level='WARN')
+
+    # ---- Stage 3: LLM Decision ----
+    logger.log("\n=== STAGE 3: Agent Decision ===")
+    prompt = format_summary_for_llm(summary, args.molecule)
+    llm_assessment = llm.ask(prompt)
+    logger.log(f'\nLLM Assessment:\n{llm_assessment}')
+
+    # Rule-based decisions (always applied, LLM provides commentary)
+    decisions = []
+    ci_data = summary.get('somaki', {})
+    s1_data = summary.get('e_s1', {})
+
+    # Decision 1: Submit CONICAL?
+    best_gap = ci_data.get('best_gap_ev', 999)
+    if best_gap < 0.100:
+        decisions.append(('CONICAL', ci_data.get('best_xyz'), 'ci_somaki'))
+        logger.log(f'  DECISION: Submit CONICAL (gap = {best_gap:.4f} eV < 0.1 eV)')
+    else:
+        logger.log(f'  DECISION: Gap too large ({best_gap:.4f} eV), skip CONICAL')
+
+    # Decision 2: Is S1 minimum also near CI?
+    s1_gap = s1_data.get('gap_at_best', 999)
+    if s1_gap < 0.100:
+        logger.log(f'  FINDING: S1 minimum IS the CI (gap = {s1_gap:.4f} eV)')
+    else:
+        logger.log(f'  FINDING: S1 minimum is distinct from CI (gap = {s1_gap:.4f} eV)')
+
+    # ---- Stage 4: CONICAL refinement ----
+    conical_results = {}
+    if not args.no_conical and decisions:
+        logger.log("\n=== STAGE 4: CONICAL Refinement ===")
+        for action, xyz_file, job_name in decisions:
+            if action == 'CONICAL' and xyz_file and os.path.exists(xyz_file):
+                result = submit_conical(xyz_file, job_name, args.molecule, logger)
+                conical_results[job_name] = result
+            elif action == 'CONICAL':
+                logger.log(f'  SKIP: No XYZ file for {job_name}')
+    elif args.no_conical:
+        logger.log("\n=== STAGE 4: CONICAL Refinement (skipped by --no-conical) ===")
+
+    # ---- Stage 4.5: Transition State Search via GPR ----
+    ts_results = {}
+    logger.log("\n=== STAGE 4.5: Transition State Search ===")
+
+    # S0 basin clustering: DBSCAN on ALL e_s0 geometries by structural
+    # similarity, selecting the lowest-energy representative per cluster.
+    # This is fundamentally different from the CI clustering in Stage 2.5
+    # (which clusters low-gap structures near conical intersections).
+    e_s0_records = all_results.get('e_s0', [])
+    coords_list = []
+    energies_s0 = []
+    record_indices = []
+    elements_list = None
+    for idx, r in enumerate(e_s0_records):
+        if r.get('xyz') and os.path.exists(r['xyz']):
+            try:
+                xyz_lines = Path(r['xyz']).read_text().splitlines()
+                natoms = int(xyz_lines[0])
+                flat_coords = []
+                elems = []
+                for line in xyz_lines[2:2 + natoms]:
+                    parts = line.split()
+                    elems.append(parts[0])
+                    flat_coords.extend([float(parts[1]), float(parts[2]), float(parts[3])])
+                coords_list.append(flat_coords)
+                energies_s0.append(r.get('E_S0', 0))
+                record_indices.append(idx)
+                if elements_list is None:
+                    elements_list = elems
+            except (ValueError, IndexError):
+                continue
+
+    e_s0_basin_clusters = []
+
+    if len(coords_list) >= 20:
+        try:
+            from sklearn.cluster import DBSCAN
+            from sklearn.preprocessing import StandardScaler
+            from sklearn.gaussian_process import GaussianProcessRegressor
+            from sklearn.gaussian_process.kernels import RBF, ConstantKernel
+
+            X = np.array(coords_list)
+            y = np.array(energies_s0)
+
+            # Cluster ALL e_s0 geometries by structural similarity
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X)
+            db = DBSCAN(eps=0.8, min_samples=3).fit(X_scaled)
+            labels = db.labels_
+            n_basins = len(set(labels) - {-1})
+            n_noise = (labels == -1).sum()
+            logger.log(f'  S0 basin DBSCAN: {n_basins} basin(s), {n_noise} outliers '
+                      f'(from {len(X)} geometries)')
+
+            # For each basin, find the lowest-energy representative
+            for bid in range(n_basins):
+                mask = labels == bid
+                basin_energies = y[mask]
+                best_local = basin_energies.argmin()
+                orig_idx = record_indices[np.where(mask)[0][best_local]]
+                best_record = e_s0_records[orig_idx]
+
+                info = {
+                    'cluster_id': bid,
+                    'n_members': int(mask.sum()),
+                    'best_e_s0': float(basin_energies.min()),
+                    'best_dir': best_record['name'],
+                    'best_xyz': best_record.get('xyz'),
+                }
+                e_s0_basin_clusters.append(info)
+                logger.log(f'    S0 basin {bid}: {info["n_members"]} members, '
+                          f'E(S0) = {info["best_e_s0"]:.6f} Ha '
+                          f'({info["best_dir"]})')
+
+        except ImportError:
+            logger.log('  scikit-learn not available, skipping S0 basin clustering')
+        except Exception as e:
+            logger.log(f'  S0 basin clustering failed: {e}', level='WARN')
+
+    if len(e_s0_basin_clusters) >= 2:
+        logger.log(f'  Found {len(e_s0_basin_clusters)} S0 minima basins -> searching for TSs')
+
+        if len(coords_list) >= 20:
+            try:
+                from sklearn.gaussian_process import GaussianProcessRegressor
+                from sklearn.gaussian_process.kernels import RBF, ConstantKernel
+
+                X = np.array(coords_list)
+                y = np.array(energies_s0)
+                X_mean = X.mean(axis=0)
+                X_std = X.std(axis=0) + 1e-10
+                X_norm = (X - X_mean) / X_std
+
+                kernel = ConstantKernel(1.0) * RBF(length_scale=1.0)
+                gpr_s0 = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=5,
+                                                   alpha=1e-6)
+                gpr_s0.fit(X_norm, y)
+
+                # --- Smart pair selection ---
+                def read_flat_coords(xyz_path):
+                    lines = Path(xyz_path).read_text().splitlines()
+                    n = int(lines[0])
+                    c = []
+                    for line in lines[2:2 + n]:
+                        parts = line.split()
+                        c.extend([float(parts[1]), float(parts[2]), float(parts[3])])
+                    return np.array(c)
+
+                cluster_coords = {}
+                cluster_energies = {}
+                for cl in e_s0_basin_clusters:
+                    xyz = cl.get('best_xyz')
+                    if xyz and os.path.exists(xyz):
+                        cluster_coords[cl['cluster_id']] = read_flat_coords(xyz)
+                        cluster_energies[cl['cluster_id']] = cl['best_e_s0']
+
+                # 2. Compute pairwise RMSD between cluster representatives
+                n_cl = len(cluster_coords)
+                cluster_ids = sorted(cluster_coords.keys())
+                logger.log(f'\n  Pairwise RMSD between {n_cl} S0 minima:')
+
+                pair_info = []
+                for ii in range(len(cluster_ids)):
+                    for jj in range(ii + 1, len(cluster_ids)):
+                        ci_id = cluster_ids[ii]
+                        cj_id = cluster_ids[jj]
+                        if ci_id not in cluster_coords or cj_id not in cluster_coords:
+                            continue
+                        x_a = cluster_coords[ci_id]
+                        x_b = cluster_coords[cj_id]
+                        natoms = len(x_a) // 3
+                        # RMSD in Angstrom
+                        diff = (x_a - x_b).reshape(natoms, 3)
+                        rmsd = np.sqrt(np.mean(np.sum(diff**2, axis=1)))
+
+                        # GPR barrier estimate
+                        n_path = 50
+                        path = np.array([x_a + t * (x_b - x_a)
+                                        for t in np.linspace(0, 1, n_path)])
+                        path_norm = (path - X_mean) / X_std
+                        path_e, path_std = gpr_s0.predict(path_norm, return_std=True)
+
+                        ts_idx = np.argmax(path_e)
+                        ts_energy = path_e[ts_idx]
+                        e_min_i = cluster_energies.get(ci_id, path_e[0])
+                        e_min_j = cluster_energies.get(cj_id, path_e[-1])
+                        barrier_fwd = (ts_energy - e_min_i) * HA_TO_EV
+                        barrier_rev = (ts_energy - e_min_j) * HA_TO_EV
+
+                        pair_info.append({
+                            'ci': ci_id, 'cj': cj_id,
+                            'rmsd': rmsd,
+                            'barrier_fwd': barrier_fwd,
+                            'barrier_rev': barrier_rev,
+                            'ts_energy': ts_energy,
+                            'ts_uncertainty': float(path_std[ts_idx]),
+                            'ts_coords': path[ts_idx],
+                            'x_a': x_a, 'x_b': x_b,
+                        })
+
+                        logger.log(f'    Cl{ci_id}-Cl{cj_id}: '
+                                  f'RMSD = {rmsd:.2f} A, '
+                                  f'barrier = {barrier_fwd:.3f}/{barrier_rev:.3f} eV, '
+                                  f'GPR unc = {path_std[ts_idx]:.4f} Ha')
+
+                # 3. Rank pairs by realistic reaction path criteria
+                # Filter: remove pairs where barrier is negative (GPR artifact)
+                #         or RMSD is too large (multi-step, not elementary)
+                #         or barrier is too small (same basin)
+                viable_pairs = [p for p in pair_info
+                               if p['barrier_fwd'] > 0.01
+                               and p['barrier_rev'] > 0.01
+                               and p['ts_uncertainty'] < 0.1]
+
+                # Sort by barrier (lowest = most kinetically accessible)
+                viable_pairs.sort(key=lambda p: min(p['barrier_fwd'], p['barrier_rev']))
+
+                logger.log(f'\n  {len(viable_pairs)} viable TS candidates '
+                          f'(of {len(pair_info)} total pairs):')
+
+                # 4. Save top candidates
+                for rank, p in enumerate(viable_pairs[:5]):
+                    pair_name = f'cl{p["ci"]}_cl{p["cj"]}'
+                    natoms = len(elements_list)
+                    ts_coords = p['ts_coords'].reshape(natoms, 3)
+                    ts_xyz = os.path.join(WORK_DIR, f'ts_candidate_{pair_name}.xyz')
+                    with open(ts_xyz, 'w') as fg:
+                        fg.write(f'{natoms}\n')
+                        fg.write(f'TS rank {rank+1}: Cl{p["ci"]}-Cl{p["cj"]} '
+                                f'RMSD={p["rmsd"]:.2f}A '
+                                f'barrier={p["barrier_fwd"]:.3f}/{p["barrier_rev"]:.3f}eV '
+                                f'unc={p["ts_uncertainty"]:.4f}Ha\n')
+                        for k in range(natoms):
+                            fg.write(f'{elements_list[k]}  {ts_coords[k,0]:.10f}  '
+                                    f'{ts_coords[k,1]:.10f}  {ts_coords[k,2]:.10f}\n')
+
+                    logger.log(f'    Rank {rank+1}: Cl{p["ci"]}-Cl{p["cj"]} '
+                              f'RMSD={p["rmsd"]:.2f} A, '
+                              f'barrier={p["barrier_fwd"]:.3f}/{p["barrier_rev"]:.3f} eV '
+                              f'-> {ts_xyz}')
+
+                    ts_results[pair_name] = {
+                        'barrier_fwd_ev': p['barrier_fwd'],
+                        'barrier_rev_ev': p['barrier_rev'],
+                        'ts_energy': p['ts_energy'],
+                        'ts_xyz': ts_xyz,
+                        'uncertainty': p['ts_uncertainty'],
+                        'rmsd': p['rmsd'],
+                        'rank': rank + 1,
+                    }
+
+                # 5. Ask LLM to assess the reaction network
+                if viable_pairs and llm.model is not None:
+                    ts_prompt = (
+                        f"You are analyzing ground-state transition states for {args.molecule}.\n"
+                        f"DBSCAN found {n_cl} distinct S0 minima clusters.\n"
+                        f"GPR predicted barriers between pairs:\n"
+                    )
+                    for p in viable_pairs[:5]:
+                        ts_prompt += (f"  Cl{p['ci']}-Cl{p['cj']}: "
+                                    f"RMSD={p['rmsd']:.2f} A, "
+                                    f"barrier={p['barrier_fwd']:.3f}/{p['barrier_rev']:.3f} eV, "
+                                    f"GPR uncertainty={p['ts_uncertainty']:.4f} Ha\n")
+                    ts_prompt += ("\nWhich paths represent realistic elementary reactions? "
+                                 "Which might be multi-step? "
+                                 "Are any barriers suspiciously low or high?")
+                    ts_assessment = llm.ask(ts_prompt, max_tokens=300)
+                    logger.log(f'\n  LLM TS assessment:\n{ts_assessment}')
+
+            except ImportError:
+                logger.log('  scikit-learn not available, skipping TS search')
+            except Exception as e:
+                logger.log(f'  TS search failed: {e}', level='WARN')
+    else:
+        if len(e_s0_basin_clusters) == 1:
+            logger.log(f'  Only 1 S0 minimum basin found -> no TS search needed')
+        elif len(e_s0_basin_clusters) == 0:
+            logger.log(f'  No S0 basins identified -> skipping TS search')
+
+    # ---- Stage 5: Report ----
+    logger.log("\n=== STAGE 5: Report ===")
+    report_file = generate_report(
+        args.molecule, summary, conical_results, llm_assessment, gpr_results, ts_results, logger
+    )
+
+    logger.log("\n" + "=" * 60)
+    logger.log("PIPELINE COMPLETE")
+    logger.log("=" * 60)
+
+
+if __name__ == '__main__':
+    main()

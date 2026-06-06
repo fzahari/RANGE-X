@@ -1,0 +1,6 @@
+4
+Cu3Pd basin_1: S0 minimum (DBSCAN basin #1, product; -520 meV vs basin #0), E(S0) = -715.9233 Ha (SF-TDDFT/BHHLYP/SBKJC)
+Cu     -0.219822    -1.129114    -0.090743
+Cu      0.546865     0.602757     1.404264
+Cu     -0.653982     0.682053    -0.848401
+Pd      2.137762    -0.708080    -0.012698

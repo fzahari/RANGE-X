@@ -1,0 +1,92 @@
+{
+  "system": "cu3pd",
+  "basin_a": {
+    "label": 0,
+    "e_s0": -715.9042144418,
+    "rep": "compute_000062_round_2_ga_0_from_6_GM"
+  },
+  "basin_b": {
+    "label": 1,
+    "e_s0": -715.9232518156,
+    "rep": "compute_000143_round_5_sc_1_from_GM"
+  },
+  "rmsd_aligned": 0.8395832711786797,
+  "n_images": 15,
+  "images": [
+    {
+      "k": 1,
+      "alpha": 0.0625,
+      "input": "image_01.inp"
+    },
+    {
+      "k": 2,
+      "alpha": 0.125,
+      "input": "image_02.inp"
+    },
+    {
+      "k": 3,
+      "alpha": 0.1875,
+      "input": "image_03.inp"
+    },
+    {
+      "k": 4,
+      "alpha": 0.25,
+      "input": "image_04.inp"
+    },
+    {
+      "k": 5,
+      "alpha": 0.3125,
+      "input": "image_05.inp"
+    },
+    {
+      "k": 6,
+      "alpha": 0.375,
+      "input": "image_06.inp"
+    },
+    {
+      "k": 7,
+      "alpha": 0.4375,
+      "input": "image_07.inp"
+    },
+    {
+      "k": 8,
+      "alpha": 0.5,
+      "input": "image_08.inp"
+    },
+    {
+      "k": 9,
+      "alpha": 0.5625,
+      "input": "image_09.inp"
+    },
+    {
+      "k": 10,
+      "alpha": 0.625,
+      "input": "image_10.inp"
+    },
+    {
+      "k": 11,
+      "alpha": 0.6875,
+      "input": "image_11.inp"
+    },
+    {
+      "k": 12,
+      "alpha": 0.75,
+      "input": "image_12.inp"
+    },
+    {
+      "k": 13,
+      "alpha": 0.8125,
+      "input": "image_13.inp"
+    },
+    {
+      "k": 14,
+      "alpha": 0.875,
+      "input": "image_14.inp"
+    },
+    {
+      "k": 15,
+      "alpha": 0.9375,
+      "input": "image_15.inp"
+    }
+  ]
+}

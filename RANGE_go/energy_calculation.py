@@ -1,0 +1,1197 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Jun  4 08:56:35 2025
+
+@author: d2j
+"""
+
+import numpy as np
+import os
+from scipy.spatial import cKDTree
+
+from ase import Atoms
+from ase.optimize import BFGS
+#from ase.io.trajectory import Trajectory
+from ase.io import read, write
+from ase.calculators.calculator import Calculator, all_changes
+from ase.neighborlist import NeighborList
+from ase.calculators.singlepoint import SinglePointCalculator
+
+import subprocess
+import shutil
+#from itertools import combinations
+import time
+
+from RANGE_go.utility import get_UFF_para, ellipsoidal_to_cartesian_deg, cartesian_to_ellipsoidal_deg, rotate_atoms_by_euler, get_translation_and_euler_from_positions
+from RANGE_go.utility import check_structure
+from RANGE_go.input_output import get_CP2K_run_info, convert_xyz_to_lmps #, convert_xyz_to_gro
+
+
+"""
+To replace the push apart function in previous versions, we use a rigid body optimizer
+that uses LJ to compute external DOF and freeze internal DOF
+"""
+class RigidLJQ_calculator(Calculator):
+    implemented_properties = ['energy', 'forces']
+
+    def __init__(self, templates, charge=0, epsilon='UFF', sigma='UFF', cutoff=2.0, 
+                 coulomb_const=14.3996, # eV·Å/e² (vacuum permittivity included)
+                 **kwargs):
+        """
+        Use function form: u_ij = 4 epsilon ( sigma^12/r_ij^12 - sigma^6/r_ij^6 )
+        templates: template of the cluster (generated from generate_bounds), to know individual molecules 
+            List of lists. Each sublist contains atom indices of one rigid molecule.
+        epsilon, sigma: LJ parameters. 
+            If single value, applies to all atoms. If dict, lookup table for element symbol -> value
+            
+        Note: This is not applicable for replace (where molecules are removed)
+        """
+        super().__init__(**kwargs)
+        self.cutoff = cutoff
+        self.lower_cutoff = 0.3 # To avoid too close atoms
+        self.coulomb_const = coulomb_const
+        self.precision = np.float32
+
+        # Create lookup for quick atom-to-molecule membership check
+        natom = 0 # index pointer
+        chemical_symbol_list = []
+        self.atom_to_mol = {}
+        self.mol_to_atom = {}
+        for i, mol in enumerate(templates): # loop all molecules
+            chemical_symbol_list += mol.get_chemical_symbols()
+            atom_index_in_this_mol = []
+            for idx in mol: # loop all atoms in this molecule
+                self.atom_to_mol[natom] = i  # This atom (natom point) belongs to this mol (i)
+                atom_index_in_this_mol.append( natom )
+                natom += 1
+            self.mol_to_atom[i] = atom_index_in_this_mol
+                
+        # Make sure LJ parameter is atom-specific
+        if isinstance(epsilon, (int, float)): # same value for all 
+            epsilon = [epsilon]*natom
+        elif isinstance(epsilon, dict): 
+            epsilon = [ epsilon[i] for i in chemical_symbol_list ] # User provided
+        elif epsilon=='UFF':
+            epsilon = [ get_UFF_para(i)[0] for i in chemical_symbol_list ] # Use UFF table
+        else:
+            raise ValueError('Epsilon is not assigned properly')
+        self.epsilon = np.array(epsilon, dtype=self.precision )
+
+        if isinstance(sigma, (int, float)): 
+            sigma = [sigma]*natom
+        elif isinstance(sigma, dict): 
+            sigma = [ sigma[i] for i in chemical_symbol_list ]
+        elif sigma=='UFF':
+            sigma = [ get_UFF_para(i)[1] for i in chemical_symbol_list ]
+        else:
+            raise ValueError('Sigma is not assigned properly')
+        self.sigma = np.array(sigma, dtype=self.precision )
+
+        # Atomic charge is also atom-specific
+        if isinstance(charge, (list,np.ndarray)):
+            if len(charge)!=natom: 
+                raise ValueError('Charge and molecules should have the same length: ', len(charge), natom)
+            else:
+                self.charge = np.array(charge, dtype=self.precision)
+        elif isinstance(charge, (int, float)):
+            self.charge = np.array([charge]*natom, dtype=self.precision)
+        else:
+            raise ValueError('Charge is not assigned properly')
+            
+        # Build neighbor list once
+        self.nl = NeighborList([self.cutoff]*natom, self_interaction=False, bothways=True)
+        
+
+    def convert_force_to_rigid(self, all_positions, all_forces, dict_mol_to_atom):
+        new_forces = np.zeros_like(all_forces).astype(self.precision)
+        for mol in dict_mol_to_atom.values():
+            pos = all_positions[mol]
+            frc = all_forces[mol]
+            pos_center  = np.mean(pos, axis=0)
+            total_force = np.sum(frc, axis=0) 
+
+            """
+            r_rel = pos - pos_center  # Dsiplacement from center
+            torque = np.sum(np.cross(r_rel, frc), axis=0)  # Torque
+            # Inertia tensor
+            Inertia = np.zeros((3, 3))
+            for i in range(len(mol)):
+                Inertia += (np.dot(r_rel[i], r_rel[i]) * np.identity(3) - np.outer(r_rel[i], r_rel[i]))
+            # Compute angular velocity (safe pseudo-inverse)
+            omega = np.linalg.pinv(Inertia) @ torque
+            """
+            
+            # Reconstruct rigid-body forces
+            f_trans = total_force/len(mol)
+            new_forces[mol] = f_trans
+            #for i, atom_idx in enumerate(mol):
+            #    f_trans = total_force/len(mol)
+            #    #f_rot = np.cross(omega, r_rel[i])
+            #    new_forces[atom_idx] = f_trans #+ f_rot
+        return new_forces        
+    
+    def calculate(self, atoms=None, properties=['energy'], system_changes=all_changes):
+        super().calculate(atoms, properties, system_changes)
+        positions = atoms.get_positions().astype(self.precision)
+        forces = np.zeros_like( positions, dtype=self.precision )
+        energy = 0.0
+
+        # Update neighbor list
+        #self.nl = NeighborList([self.cutoff]*len(positions), self_interaction=False, bothways=True)
+        self.nl.update(atoms)
+
+        # Prepare arrays for vectorization
+        i_list, j_list, rij_list = [], [], []
+        for i in range( len(positions) ):
+            indices, offsets = self.nl.get_neighbors(i)
+            for j, offset in zip(indices, offsets):
+                if j <= i or self.atom_to_mol[i] == self.atom_to_mol[j]:  # avoid double counting, or intramolecule force
+                    continue
+                i_list.append(i)
+                j_list.append(j)
+                rij = positions[j] + np.dot(offset, atoms.get_cell()) - positions[i]
+                rij_list.append(rij)
+
+        if len(i_list) == 0:
+            self.results['energy'] = 0.0
+            self.results['forces'] = np.zeros_like(positions)
+            return
+
+        i_list = np.array(i_list)
+        j_list = np.array(j_list)
+        rij_list = np.array( rij_list, dtype=self.precision )
+
+        # Distances
+        r = np.linalg.norm(rij_list, axis=1)
+        r = np.maximum(r, self.lower_cutoff)  # avoid zero division by element-pair comparison
+
+        # LJ parameters
+        sigma_ij = ( self.sigma[i_list] + self.sigma[j_list] ) / 2
+        eps_ij = np.sqrt( self.epsilon[i_list] * self.epsilon[j_list] )
+
+        # LJ energy & forces (vectorized)
+        sr6 = (sigma_ij / r) ** 6
+        sr12 = sr6 * sr6
+        e_cutoff = 4 * eps_ij * ((sigma_ij / self.cutoff) ** 12 - (sigma_ij / self.cutoff) ** 6)
+        e_lj = 4 * eps_ij * (sr12 - sr6) - e_cutoff
+        f_lj = -24 * eps_ij / r * (2 * sr12 - sr6)
+
+        # Coulomb energy & forces (vectorized)
+        qq = self.charge[i_list] * self.charge[j_list]  # q1*q2
+        e_coul = self.coulomb_const * qq / r
+        f_coul = self.coulomb_const * qq / (r ** 2)
+
+        # Total forces per pair
+        f_total = (f_lj + f_coul)[:, None] * (rij_list / r[:, None])
+
+        # Accumulate forces and energy
+        np.add.at(forces, i_list, f_total)
+        np.add.at(forces, j_list, -f_total)
+        energy = np.sum(e_lj + e_coul)
+
+        # Convert to rigid forces per molecule
+        forces = self.convert_force_to_rigid(positions, forces, self.mol_to_atom)
+
+        self.results['energy'] = float(energy)
+        self.results['forces'] = forces.astype(np.float64) # ASE requires
+
+
+class energy_computation:
+    """
+    This contains the functionalities of computing the energy of a molecular structure
+    It needs the template of the cluster (generated from generate_bounds), just to know what we are modeling.
+    """
+    def __init__(self, templates, go_conversion_rule, 
+                 calculator=None, calculator_type='structural', geo_opt_para=None, 
+                 if_coarse_calc=False, coarse_calc_para=None,
+                 save_output_level = 'Simple',
+                 check_structure_sanity = None,
+                 ):
+        """
+        if calc_type == 'internal', use ASE calculator. Then calculator = ASE calculator.
+        if calc_type == 'external', use external calculator. Then calculator = command line to run the external computation.
+        """
+        self.templates = templates
+        self.go_conversion_rule = go_conversion_rule
+        self.calculator = calculator
+        self.calculator_type = calculator_type
+        self.geo_opt_para = geo_opt_para
+        self.save_output_level = save_output_level
+        self.check_structure_sanity = check_structure_sanity
+        
+        self.if_coarse_calc = if_coarse_calc
+        if self.if_coarse_calc:
+            try:  # Make these settings explicit so that everything is clear
+                self.coarse_calc_eps = coarse_calc_para['coarse_calc_eps']
+                self.coarse_calc_sig = coarse_calc_para['coarse_calc_sig']
+                self.coarse_calc_chg = coarse_calc_para['coarse_calc_chg']
+                self.coarse_calc_step = coarse_calc_para['coarse_calc_step']
+                self.coarse_calc_fmax = coarse_calc_para['coarse_calc_fmax']
+                self.coarse_calc_constraint = coarse_calc_para['coarse_calc_constraint']
+                #self.coarse_calc_cutoff = coarse_calc_para['coarse_calc_cutoff']
+            except:
+                raise ValueError('Coarse optimization parameter is missing or incorrect')
+            self.coarse_calculator = RigidLJQ_calculator(self.templates, 
+                                                         charge = self.coarse_calc_chg, 
+                                                         epsilon= self.coarse_calc_eps, 
+                                                         sigma  = self.coarse_calc_sig,
+                                                         #cutoff = self.coarse_calc_cutoff,
+                                                         )
+        # For cell size and PBC condition:
+        self.Global_cell_size = self.templates[0].get_cell() # e.g., (0,0,0) or (10,20,0) or (10,10,10) etc.
+        self.Global_cell_condition = self.templates[0].get_pbc() # e.g., (True, True, False) for Dirichlet-BC, All True for PBC
+
+    # Convert a vec X to 3D structure using template 
+    def vector_to_cluster(self, vec):
+        """
+        vec : (6*templates  real-valued array, to inform the movement of molecules. 
+             This is obtained from the ABC algorithm.
+        templates : list of ase.Atoms (one per molecule)
+        Returns an ase.Atoms super-molecule positioned & rotated.
+        """
+            
+        placed, resname_of_placed, resid_of_placed = Atoms(), [], []
+        for i, mol in enumerate(self.templates):
+            # We need to keep molecules in templates unchanged
+            m = mol.copy()
+            center_of_geometry = np.mean(m.get_positions(),axis=0)
+
+            # at_position , in_box without outside box option
+            if self.go_conversion_rule[i][0] in ['at_position','in_box']: 
+                t = vec[6*i : 6*i+3]  # Cartesian coord in vec by default
+                euler = vec[6*i+3 : 6*i+6]  # Second 3 values are rotation Euler angles
+                m = rotate_atoms_by_euler(m, center_of_geometry, euler[0], euler[1], euler[2] )
+                m.translate( t )
+                
+            # in_box + outside box option: inside box with outside limit: where the two parameter inside tells the lo and hi of inner box
+            elif self.go_conversion_rule[i][0]=='in_box_out':     
+                t = vec[6*i : 6*i+3]  # Cartesian coord in vec by default
+                euler = vec[6*i+3 : 6*i+6]  # Second 3 values are rotation Euler angles
+                m = rotate_atoms_by_euler(m, center_of_geometry, euler[0], euler[1], euler[2] )
+                # Now we need to adjust the translation vector t
+                xlo, ylo, zlo = self.go_conversion_rule[i][1]
+                xhi, yhi, zhi = self.go_conversion_rule[i][2]
+                if_inside_inner = (xlo <= t[0] <= xhi) and (ylo <= t[1] <= yhi) and (zlo <= t[2] <= zhi)
+                if if_inside_inner:
+                    distances = {'xlo': abs(t[0] - xlo), 'xhi': abs(t[0] - xhi),  
+                                 'ylo': abs(t[1] - ylo), 'yhi': abs(t[1] - yhi),
+                                 'zlo': abs(t[2] - zlo), 'zhi': abs(t[2] - zhi),
+                                 }
+                    closest_face = min(distances, key=distances.get) # Get key for the smallest distance
+                    if closest_face == 'xlo':  
+                        t[0] = xlo - 1e-3
+                    elif closest_face == 'xhi':
+                        t[0] = xhi + 1e-3
+                    elif closest_face == 'ylo':
+                        t[1] = ylo - 1e-3
+                    elif closest_face == 'yhi':
+                        t[1] = yhi + 1e-3
+                    elif closest_face == 'zlo':
+                        t[2] = zlo - 1e-3
+                    elif closest_face == 'zhi':
+                        t[2] = zhi + 1e-3
+                m.translate( t )
+                
+            # in_sphere_shell: Check if we have sphere coord in vec. If so, we have 3 semi-axis values here and need to convert t (r, theta, phi) to cart coord
+            elif self.go_conversion_rule[i][0]=='in_sphere_shell': 
+                t = vec[6*i : 6*i+3] 
+                x,y,z = ellipsoidal_to_cartesian_deg(t[0], t[1], t[2], 
+                                             self.go_conversion_rule[i][1], 
+                                             self.go_conversion_rule[i][2], 
+                                             self.go_conversion_rule[i][3])
+                t = np.array([x,y,z])
+                euler = vec[6*i+3 : 6*i+6]  # Second 3 values are rotation Euler angles
+                m = rotate_atoms_by_euler(m, center_of_geometry, euler[0], euler[1], euler[2] )
+                m.translate( t )
+                
+            # on_surface:    
+            # Check if we have the face information from on_surface. If so, we have 3 surface info: face ID, factor 1 and 2 to look for points in plane
+            # We also have the 3 or 2 rotation info to determine the orientation of molecule adsorbed on surface.
+            elif self.go_conversion_rule[i][0]=='on_surface': 
+                t = vec[6*i : 6*i+6] 
+                face = self.go_conversion_rule[i][ 3+round(t[0]) ] # get the specific face info: 3 points + 1 surface adsorption normal point
+                adsorb_surf_vector = (face[1] - face[0])*t[1] +face[0]
+                adsorb_surf_vector += (face[2] - adsorb_surf_vector)*t[2]  
+                adsorb_location = adsorb_surf_vector + face[3]*t[3]
+                
+                template_adsorb_atom_location = m.positions[self.go_conversion_rule[i][1]] # 1= adsorbate_at_position
+                template_adsorb_direction = m.positions[self.go_conversion_rule[i][2]] - template_adsorb_atom_location # 2= direction atom
+                
+                m.translate( adsorb_location - template_adsorb_atom_location ) 
+                if len(m)>1:
+                    m.rotate( template_adsorb_direction, face[3], center=adsorb_location)  # adsorbate_in_direction --> surf_norm 
+                    m.rotate( t[4], face[3], center=adsorb_location )
+                    #m.rotate( t[5], 'x', center=adsorb_location )
+                
+            elif self.go_conversion_rule[i][0] == 'in_pore':
+                t, euler = vec[6*i : 6*i+3], vec[6*i+3 : 6*i+6] 
+                m = rotate_atoms_by_euler(m, center_of_geometry, euler[0], euler[1], euler[2] )
+                grid_point_location = self.go_conversion_rule[i][1][ round(t[0]) ] # grid point coord
+                m.translate( grid_point_location - center_of_geometry )
+                
+            elif self.go_conversion_rule[i][0] == 'layer': 
+                t, euler = vec[6*i : 6*i+3], vec[6*i+3 : 6*i+6] 
+                #m = rotate_atoms_by_euler(m, center_of_geometry, euler[0], euler[1], euler[2] )
+                grid_point_location = self.go_conversion_rule[i][2][ round(t[0]) ] # grid point coord
+                m.translate( grid_point_location - m.positions[self.go_conversion_rule[i][1]] )
+            
+            elif self.go_conversion_rule[i][0] == 'micelle': 
+                t, euler = vec[6*i : 6*i+3], vec[6*i+3 : 6*i+6] 
+                #m = rotate_atoms_by_euler(m, center_of_geometry, euler[0], euler[1], euler[2] )
+                grid_point_location = self.go_conversion_rule[i][3][ round(t[0]) ] # grid point coord
+                grid_point_direction = self.go_conversion_rule[i][4][ round(t[0]) ] # grid point surf norm
+                m.translate( grid_point_location - m.positions[self.go_conversion_rule[i][1]] ) 
+                m.rotate( m.positions[self.go_conversion_rule[i][2]]-m.positions[self.go_conversion_rule[i][1]], grid_point_direction, center=grid_point_location )
+                
+            # replace: The replacement function to replace atoms. If the atom symbol is X, it means a vaccancy.
+            elif self.go_conversion_rule[i][0]=='replace': 
+                t = vec[6*i : 6*i+3] 
+                euler = vec[6*i+3 : 6*i+6]  # Second 3 values are rotation Euler angles
+                m = rotate_atoms_by_euler(m, center_of_geometry, euler[0], euler[1], euler[2] )
+                substrate_atom_id = self.go_conversion_rule[i][1][ round(t[0]) ] # int: atom id to be changed
+                m.translate( placed.positions[substrate_atom_id] - center_of_geometry )
+                placed.symbols[substrate_atom_id] = 'X'
+             
+            else:
+                raise ValueError(f'go_conversion_rule has a wrong keyword: {self.go_conversion_rule[i][0]}')
+
+            # Move and rotate the molecule to final destination
+            # Or new_mol_xyz = mol.get_positions().dot(rot.T) + t where Rotation.from_euler('zxz', euler).as_matrix()
+            placed += m
+            resname_of_placed += m.get_array('residuenames' ).tolist()
+            resid_of_placed += [i]*len(m) 
+                    
+        cluster = Atoms(placed) #concatenate Atoms(placed)
+        cluster.new_array('residuenames', resname_of_placed, str)
+        cluster.new_array('residuenumbers', resid_of_placed, str)
+        
+        # To support vaccancy function
+        #del cluster[[atom.index for atom in cluster if atom.symbol=='X']]
+        
+        # Always add cell, even if not PBC
+        cluster.set_pbc( self.Global_cell_condition )
+        cluster.set_cell( self.Global_cell_size )
+        
+        return cluster
+
+
+    def cluster_to_vector(self, cluster, vec):
+        """
+        Convert cluster (ASE atoms) to vector. 
+        """
+        atom_idx_header = 0 # to point to the atoms in cluster
+        vec_new = []
+        for i, mol_old in enumerate(self.templates):
+            mol_new = cluster[ atom_idx_header: atom_idx_header+len(mol_old) ]
+            
+            atom_idx_header += len(mol_old) # Move to the next molecule
+            # positions of initial and final states
+            pos_old = mol_old.get_positions()
+            pos_new = mol_new.get_positions()
+            x, y, z, phi, theta, psi = get_translation_and_euler_from_positions(pos_old, pos_new)
+            
+            # Now convert x,y,z, phi, theta, psi to proper format
+            if self.go_conversion_rule[i][0] in ['at_position','in_box','in_box_out']:  # position, inbox, outside inbox
+                vec_new += [x,y,z, phi, theta, psi] 
+                
+            elif self.go_conversion_rule[i][0]=='in_sphere_shell':  # Spherical coord
+                r_trans, theta_trans, phi_trans = cartesian_to_ellipsoidal_deg(x,y,z,
+                                                                               self.go_conversion_rule[i][1],
+                                                                               self.go_conversion_rule[i][2],
+                                                                               self.go_conversion_rule[i][3])
+                vec_new += [r_trans, theta_trans, phi_trans, phi, theta, psi]
+                
+            elif self.go_conversion_rule[i][0] == 'in_pore':  # grid points in pore 
+                tree = cKDTree(self.go_conversion_rule[i][1])
+                distance, grid_index = tree.query( np.mean(pos_new,axis=0) , k=1 )
+                vec_new += [ grid_index,0,0, phi, theta, psi ]
+            
+            elif self.go_conversion_rule[i][0] == 'layer':  # grid points in layer 
+                tree = cKDTree(self.go_conversion_rule[i][2])
+                distance, grid_index = tree.query( pos_new[self.go_conversion_rule[i][1]] , k=1)
+                vec_new += [ grid_index,0,0, phi, theta, psi ]
+            
+            elif self.go_conversion_rule[i][0] == 'micelle':  # grid points in micelle
+                tree = cKDTree(self.go_conversion_rule[i][3])
+                distance, grid_index = tree.query( pos_new[self.go_conversion_rule[i][1]] , k=1)
+                vec_new += [ grid_index,0,0, phi, theta, psi ]
+                
+            elif self.go_conversion_rule[i][0]=='on_surface': # on surface
+                mol_vec = vec[6*i : 6*i+6]
+                surf_idx = int(mol_vec[0]) # remain the same surface index. Output's 1st value.
+                face = self.go_conversion_rule[i][ 3+surf_idx ]
+                # Where adsorbate atoms are now:                
+                adsorb_location_new = pos_new[ self.go_conversion_rule[i][1] ]
+                adsorb_direction_new = pos_new[ self.go_conversion_rule[i][2] ] - adsorb_location_new
+                # project adsorb atom on the surface
+                v = adsorb_location_new - face[0] # from p0 to adsorbate
+                distance = np.dot(v, face[3]) # distance from adsorbent to plane along surf norm. Also 4th value of output
+                projected_point = adsorb_location_new - distance*face[3] 
+                # Now we first find the intermediate point on p0-p1
+                v1 = face[1] - face[0]
+                v2 = projected_point - face[2]
+                A = np.column_stack([-v1, v2])
+                b = face[2] - face[0]
+                # Solve A @ [x1, x2] = b using least-squares. Only valid if lines intersect (or nearly do)
+                sol, residuals, rank, s = np.linalg.lstsq(A, b, rcond=None)
+                x1, x2 = sol # The 2nd and 3rd value of output
+                # Lastly, the rotation angle along surf norm
+                if len(mol_new)>1:
+                    mol_new.rotate( adsorb_direction_new, face[3], center=adsorb_location_new)
+                    pos_new = mol_new.get_positions()
+                    v_new = pos_new - np.mean(pos_new, axis=0)
+                    v_old = pos_old - np.mean(pos_old, axis=0)
+                    for n in range(len(v_new)):
+                        v1 = v_old[n] - np.dot(v_old[n], face[3]) * face[3]
+                        v2 = v_new[n] - np.dot(v_new[n], face[3]) * face[3]
+                        if np.linalg.norm(v1) > 1e-6 and np.linalg.norm(v2) > 1e-6:
+                            break
+                        #else:
+                        #    raise ValueError("No atom suitable for computing rotation angle (all aligned with axis?)")
+                    v1 = v1/ np.linalg.norm(v1) 
+                    v2 = v2/ np.linalg.norm(v2)
+                    dot = np.clip(np.dot(v1, v2), -1.0, 1.0)
+                    cross = np.cross(v1, v2)
+                    angle_rad = np.arccos(dot)
+                    sign = np.sign(np.dot(cross, face[3]))
+                    angle_deg = np.degrees(angle_rad) * sign
+                    angle_deg = angle_deg % 360 # Normalize to 0-360
+                else:
+                    angle_deg = 0
+                # Final output
+                vec_new += [surf_idx, x1, x2, distance, angle_deg, 0]
+                
+            elif self.go_conversion_rule[i][0]=='replace':  # Replace function needs no revision
+                vec_new += list(vec[6*i : 6*i+3])
+            else:
+                raise ValueError(f'go_conversion_rule has a wrong keyword: {self.go_conversion_rule[i][0]}')
+
+        return np.array(vec_new)
+
+
+    # The obj func for energy computing
+    # Assign possible ways to compute energy
+    def obj_func_compute_energy(self, vec, computing_id, save_output_directory):
+        atoms = self.vector_to_cluster(vec)
+
+        if self.save_output_level == 'Simple' and self.calculator_type == 'ase':
+            pass
+        elif self.calculator_type != 'structural':
+            # Each specific job folder
+            new_cumpute_directory = os.path.join(save_output_directory,computing_id)
+            os.makedirs( new_cumpute_directory, exist_ok=True)   
+            # Log the starting structure
+            write( os.path.join(new_cumpute_directory, 'start.xyz'), atoms, format='xyz' )
+        
+        # if use coarse calc to pre-relax
+        if self.if_coarse_calc:
+            atoms.calc = self.coarse_calculator 
+            if self.save_output_level == 'Full':
+                dyn_log = os.path.join(new_cumpute_directory, 'coarse-opt.log')
+                dyn = BFGS(atoms, logfile=dyn_log ) 
+            elif self.save_output_level == 'Simple':
+                dyn = BFGS(atoms, logfile=None)
+            else:
+                raise ValueError('Saving output level keyword is not supported')
+                
+            if self.coarse_calc_constraint is not None:
+                atoms.set_constraint( self.coarse_calc_constraint )
+                
+            try:
+                dyn.run( fmax=self.coarse_calc_fmax, steps=self.coarse_calc_step )
+            except:
+                print(computing_id, 'Coarse optimization was not successful. Skipped to fine optimization.')
+                
+            if self.save_output_level == 'Simple' and self.calculator_type == 'ase':
+                pass
+            elif self.calculator_type != 'structural':
+                write( os.path.join(new_cumpute_directory, 'coarse_final.xyz'), atoms, format='xyz') 
+            vec = self.cluster_to_vector( atoms, vec ) # update vec after coarse opt
+                          
+        # The fine optimization
+        start_time = time.time()
+        if self.calculator_type == 'ase':   # To use ASE calculator
+            atoms.calc = self.calculator
+            # If anything happens (e.g. SCF not converged due to bad structure), return a fake high energy
+            if self.geo_opt_para is not None:
+                if self.save_output_level == 'Full':
+                    dyn_log = os.path.join(new_cumpute_directory, 'opt.log') 
+                    dyn = BFGS(atoms, logfile=dyn_log ) 
+                elif self.save_output_level == 'Simple':
+                    dyn = BFGS(atoms, logfile=None)
+                else:
+                    raise ValueError('Saving output level keyword is not supported')
+                ##traj = Trajectory( os.path.join(new_cumpute_directory, 'opt.traj'), 'w', atoms)
+                ##dyn.attach(traj.write, interval=10)
+                try:
+                    fmax = self.geo_opt_para['fmax']
+                    steps = self.geo_opt_para['steps']
+                except:
+                    raise ValueError('Geo Opt cannot be done due to missing parameter fmax or steps' )
+
+                dual_opt = None
+                if 'ase_constraint' in self.geo_opt_para:
+                    atoms.set_constraint( self.geo_opt_para['ase_constraint'] )
+                    if 'Dual_stage_optimization' in self.geo_opt_para: 
+                        dual_opt = self.geo_opt_para['Dual_stage_optimization']
+
+                try:                    
+                    dyn.run( fmax=fmax, steps=steps )
+                    if dual_opt is not None:
+                        atoms.set_constraint()  # Remove constraints
+                        dual_fmax, dual_steps = dual_opt['fmax'], dual_opt['steps'] #, dual_opt['ase_constraint']
+                        dyn.run( fmax=dual_fmax, steps=dual_steps )
+                    energy = atoms.get_potential_energy()
+                    vec = self.cluster_to_vector( atoms, vec )    # Update vec after fine opt
+                except:
+                    #print('Cannot optimize properly to get energy: ', computing_id)
+                    energy = 5555555 # Cannot optimize properly to get energy
+                    # And vec is not changed
+            else:
+                try:
+                    energy = atoms.get_potential_energy()
+                except:
+                    energy = 6666666 # Cannot compute energy.
+
+        elif self.calculator_type == 'external': # To use external command
+            atoms, energy = self.call_external_calculation(atoms, new_cumpute_directory, self.calculator , self.geo_opt_para)
+            vec = self.cluster_to_vector( atoms, vec )  
+            
+        elif self.calculator_type == 'structural': # For structure generation
+            if self.if_coarse_calc:
+                energy = atoms.get_potential_energy()
+            else:
+                energy = 0.0
+            
+        else:
+            raise ValueError('calculator_type is not supported')
+
+        # Final check on structure for unreasonable geometry
+        energy = check_structure(atoms, energy, self.check_structure_sanity)
+        # Always assign the updated energy to atoms
+        atoms.calc = SinglePointCalculator(atoms, energy=energy)
+            
+        # Vec, structure and energy are all finalized now. They will be saved in db file.
+        if self.save_output_level == 'Full':
+            np.savetxt(os.path.join(new_cumpute_directory, 'vec.txt'), vec, delimiter=',')  
+            write( os.path.join(new_cumpute_directory, 'final.xyz'), atoms )
+            np.savetxt(os.path.join(new_cumpute_directory, 'energy.txt'), [energy], delimiter=',')
+            
+        current_time = np.round(time.time() - start_time , 3)
+        print( 'Time cost (s) for ',computing_id.ljust(50), str(current_time).rjust(10), ' with energy: ', np.round(energy,8) )  
+        
+        return  vec, energy, atoms
+    
+        
+    # Call the external tool to compute energy
+    def call_external_calculation(self, atoms, job_directory, calculator_command_lines , geo_opt_para_line ):
+        """
+        Prepare the input script, run and save output to a file, get energy from the output file
+        
+        Parameters
+        ----------
+        atoms : ASE obj
+            The atoms generated.
+        job_directory : str
+            This job's directory path. All computations need to be done here.
+        calculator_command_lines : str
+            The bash commands needed to perform this computation. 
+            It can has multiple lines as long as each line is seprated by ;
+        geo_opt_para_line : str
+            Provide additional controls.
+
+        Returns
+        -------
+        atoms: ASE atoms
+        energy : float
+            The energy of this ASE obj (atoms).
+
+        """
+        
+        # Know which file to use as initial structure
+        start_xyz = 'start.xyz'
+        if self.if_coarse_calc:
+            start_xyz = 'coarse_final.xyz'
+        
+        # Go to the job folder and update the input 
+        current_directory = os.getcwd()
+        os.chdir(job_directory)
+        calculator_command_lines = calculator_command_lines.replace('{input_xyz}', start_xyz)
+
+        # Compute
+        if geo_opt_para_line['method'] == 'xTB':
+            if self.save_output_level == 'Full':
+                calculator_command_lines += ' > job.log ' # Write results to job.log
+                try:
+                    result = subprocess.run(calculator_command_lines, shell=True, check=False, capture_output=True, text=True )
+                    energy, energy1 = [],[]
+                    with open('job.log','r') as f1:
+                        for line in f1.readlines():
+                            if "TOTAL ENERGY" in line:
+                                energy.append( line.split() )
+                            if "* total energy " in line:
+                                energy1.append( line.split() )
+                except: # If the job cannot be performed.
+                    energy = None  # In case the structure is really bad and you cannot compute its energy. We still want to continue the code.
+            elif self.save_output_level == 'Simple':
+                try:
+                    result = subprocess.run(calculator_command_lines, shell=True, check=False, capture_output=True, text=True )
+                    energy, energy1 = [],[]
+                    for line in result.stdout.split('\n'):
+                        if "TOTAL ENERGY" in line:
+                            energy.append( line.split() ) 
+                        if "* total energy " in line:
+                            energy1.append( line.split() )
+                except:
+                    energy = None
+            else:
+                raise ValueError('Output saving level keyword is wrong')
+                    
+            # Get the energy
+            if energy is not None:
+                if len(energy)>0:
+                    energy = float(energy[-1][3]) # last energy. Value is the 4th item
+                elif len(energy1)>0:
+                    energy = float(energy1[-1][4]) 
+                else:
+                    energy = 1e12 # Optimization done but no energy written. This should not happen.
+            else:
+                energy = 7777777
+            
+            # Get the final structure
+            if os.path.exists( 'xtbopt.xyz' ):
+                final_xyz = 'xtbopt.xyz'
+            elif os.path.exists( 'xtblast.xyz' ):
+                final_xyz = 'xtblast.xyz'
+            else:
+                final_xyz = f'{start_xyz}'
+
+            if self.save_output_level == 'Full':
+                shutil.copyfile( f'{final_xyz}' , 'final.xyz' )
+            atoms = read(f'{final_xyz}')
+            
+        elif geo_opt_para_line['method'] == 'DFTB+':
+            if 'input' in geo_opt_para_line: # Check if input is ready
+                if os.path.exists( geo_opt_para_line['input'] ): # If we provide absolute path
+                    calc_input = geo_opt_para_line['input']
+                elif os.path.exists( os.path.join(current_directory, geo_opt_para_line['input']) ) :# Check job root path
+                    calc_input = os.path.join(current_directory, geo_opt_para_line['input'])
+                else:
+                    raise ValueError('DFTB+ input (dftb_in.hsd) is not found from key path')  
+                # Run 
+                shutil.copyfile( start_xyz , 'data-DFTBplus-initial.xyz' )
+                shutil.copyfile( calc_input , 'dftb_in.hsd' )
+                #calculator_command_lines = calculator_command_lines.replace('{input_script}', 'input-ORCA')
+                try:
+                    result = subprocess.run(calculator_command_lines, 
+                                            shell=True, check=False, 
+                                            capture_output=True, text=True
+                                            )
+                    # Now get the energy 
+                    with open('detailed.out','r') as f1:
+                        energy = [line.split() for line in f1.readlines() if "Total energy:" in line ]
+                    energy = float(energy[-1][-2]) # Value is the 2nd-to-last value, unit=eV
+                    # Get the final xyz 
+                    atoms = read( 'data-out.xyz' )
+                except subprocess.CalledProcessError as e:
+                    print( 'DFTB+ Error: ', job_directory , e.stderr)
+                    energy = 7777777
+                    atoms = read(start_xyz)
+            else:
+                raise NameError('DFTB+ input is not provided by input key')            
+                
+        elif geo_opt_para_line['method'] == 'CP2K':
+            if 'input' in geo_opt_para_line: # Check if CP2K input is ready
+                if os.path.exists( geo_opt_para_line['input'] ): # If we provide absolute path
+                    CP2K_input = geo_opt_para_line['input']
+                elif os.path.exists( os.path.join(current_directory, geo_opt_para_line['input']) ) :# Check job root path
+                    CP2K_input = os.path.join(current_directory, geo_opt_para_line['input'])
+                else:
+                    raise ValueError('CP2K input is not found from key path')                   
+                # Run CP2K
+                shutil.copyfile( start_xyz , 'data-CP2K-initial.xyz' )
+                calculator_command_lines = calculator_command_lines.replace('{input_script}', CP2K_input)
+                try:
+                    result = subprocess.run(calculator_command_lines, 
+                                            shell=True, check=False, 
+                                            capture_output=True, text=True
+                                            )
+                    # Now get the energy from CP2K
+                    with open('job.log','r') as f1:
+                        energy = [line.split() for line in f1.readlines() if "Total energy: " in line ]
+                    energy = float(energy[-1][2]) # last energy. Value is the 3rd item
+                    # Get the final xyz from either initial or optimized xyz, depending on input runtype
+                    atoms = get_CP2K_run_info(CP2K_input, start_xyz)
+                    
+                except subprocess.CalledProcessError as e:
+                    print( job_directory , e.stderr)
+                    energy = 7777777
+                    atoms = read(start_xyz)
+
+            else:
+                raise NameError('CP2K input is not provided by input key')
+        
+        elif geo_opt_para_line['method'] == 'Gaussian':
+            if 'input' in geo_opt_para_line:
+                if os.path.exists( geo_opt_para_line['input'] ):
+                    gaus_input = geo_opt_para_line['input']
+                elif os.path.exists( os.path.join(current_directory, geo_opt_para_line['input']) ) :# Check job root path
+                    gaus_input = os.path.join(current_directory, geo_opt_para_line['input'])
+                else:
+                    raise ValueError("Gaussian input needs to be provided by geo_opt_para_line['input']= XXX")    
+                                    
+                with open(start_xyz, 'r') as f1: # read XYZ coordinates and element symbols
+                    lines = f1.readlines()
+                    content_xyz = '\n'.join( [ '  '.join(line.split()[:4]) for line in lines[2:] ] )
+                    natoms = int( lines[0] )
+                    elements = [ line.split()[0] for line in lines[2:] ]
+                with open(gaus_input,'r') as f2: # read Gaussian input
+                    content_ga = f2.read()
+                content_ga = content_ga.replace( "{structure_info}", content_xyz)
+                with open('gaussian_input', 'w') as f3:
+                    f3.write(content_ga)
+                    
+                calculator_command_lines = calculator_command_lines.replace('{input_script}', 'gaussian_input')
+                try:
+                    subprocess.run(calculator_command_lines, shell=True, check=False, capture_output=True, text=True)
+                    energy = None
+                except:
+                    print( f' Gaussian failed. Check detail at {job_directory}. Moving on with a fake high energy.' )
+                    energy = 7777777
+                    atoms = read(start_xyz)
+                
+                if energy is None: # calculation done successfully
+                    with open('job.log','r') as f4:  # Both energy and structure is here
+                        lines = f4.readlines()
+                        energy, atoms = [],[]
+                        for line_idx, line in enumerate(lines):
+                            if "SCF Done" in line:
+                                energy.append( line.split()[4] )
+                            elif "Coordinates (Angstroms)" in line:
+                                atoms.append( [ lines[idx].split()[3:] for idx in range(line_idx+3, line_idx+3+natoms) ] )
+                                
+                    energy = float( energy[-1] )
+                    atoms = Atoms( elements, positions = np.array(atoms[-1],dtype=float) )
+
+            else:
+                raise NameError('Gaussian input is not provided by input key geo_opt_para_line')
+            
+        elif geo_opt_para_line['method'] == 'ORCA':
+            if 'input' in geo_opt_para_line: # Check if input is ready
+                if os.path.exists( geo_opt_para_line['input'] ): # If we provide absolute path
+                    ORCA_input = geo_opt_para_line['input']
+                elif os.path.exists( os.path.join(current_directory, geo_opt_para_line['input']) ) :# Check job root path
+                    ORCA_input = os.path.join(current_directory, geo_opt_para_line['input'])
+                else:
+                    raise ValueError('ORCA input is not found from key path')  
+                # Run ORCA
+                shutil.copyfile( start_xyz , 'data-ORCA-initial.xyz' )
+                shutil.copyfile( ORCA_input , 'input-ORCA' )
+                calculator_command_lines = calculator_command_lines.replace('{input_script}', 'input-ORCA')
+                try:
+                    result = subprocess.run(calculator_command_lines, 
+                                            shell=True, check=False, 
+                                            capture_output=True, text=True
+                                            )
+                    # Now get the energy from ORCA
+                    with open('job.log','r') as f1:
+                        energy = [line.split() for line in f1.readlines() if "FINAL SINGLE POINT ENERGY" in line ]
+                    energy = float(energy[-1][-1]) # last energy. Value is the last value
+                    # Get the final xyz 
+                    atoms = read( 'input-ORCA.xyz' )
+                except subprocess.CalledProcessError as e:
+                    print( 'ORCA Error: ', job_directory , e.stderr)
+                    energy = 7777777
+                    atoms = read(start_xyz)
+            else:
+                raise NameError('ORCA input is not provided by input key')
+                
+        elif geo_opt_para_line['method'] == 'LAMMPS':
+            if 'input' in geo_opt_para_line: # Check if LAMMPS input is ready
+                if os.path.exists( geo_opt_para_line['input'] ): # If we provide absolute path
+                    LMPS_input = geo_opt_para_line['input']
+                elif os.path.exists( os.path.join(current_directory, geo_opt_para_line['input']) ) :# Check job root path
+                    LMPS_input = os.path.join(current_directory, geo_opt_para_line['input'])
+                else:
+                    raise ValueError('LAMMPS input is not found from key path') 
+                # Run
+                convert_xyz_to_lmps(start_xyz, 'data-in.lammps')
+                calculator_command_lines = calculator_command_lines.replace('{input_script}', LMPS_input)
+                try:
+                    result = subprocess.run(calculator_command_lines, 
+                                            shell=True, check=False, 
+                                            capture_output=True, text=True
+                                            )
+                    # Now get the energy from LAMMPS
+                    with open('job.log','r') as f1:
+                        energy = [line.split() for line in f1.readlines() if len(line.split())==3 ]
+                        energy = [e for e in energy if e[0]=='FINAL' and e[1]=='ENERGY' ]
+                    energy = float(energy[-1][3]) # last energy. Value is the last value
+                    # Get the final structure 
+                    atoms = read( 'data-out.lammps' )
+                except subprocess.CalledProcessError as e:
+                    print( 'LAMMPS Error: ', job_directory , e.stderr)
+                    energy = 7777777
+                    atoms = read(start_xyz)
+                    
+        elif geo_opt_para_line['method'] == 'GROMACS':
+            raise ValueError('GROMACS is disabled due to compatibility issue. Will reopen after further correction')
+            """
+            if 'input' in geo_opt_para_line: # Check if GMX input is ready
+                if os.path.exists( geo_opt_para_line['input'] ): # If we provide absolute path
+                    GMX_input = geo_opt_para_line['input']
+                elif os.path.exists( os.path.join(current_directory, geo_opt_para_line['input']) ) :# Check job root path
+                    GMX_input = os.path.join(current_directory, geo_opt_para_line['input'])
+                else:
+                    raise ValueError('GROMACS input is not found from key path') 
+                # Run
+                convert_xyz_to_gro(start_xyz, 'data-in.gro')
+                calculator_command_lines = calculator_command_lines.replace('{input_script}', GMX_input)
+                try:
+                    result = subprocess.run(calculator_command_lines, 
+                                            shell=True, check=False, 
+                                            capture_output=True, text=True
+                                            )
+                    # Now get the energy from output
+                    with open('job.log','r') as f1:
+                        energy = [line.split() for line in f1.readlines() if len(line.split())==4 ]
+                        energy = [e for e in energy if e[0]=='Potential' and e[1]=='Energy' ]
+                    energy = float(energy[-1][3]) # last energy. Value is the last value
+                    # Get the final structure 
+                    atoms = read( 'data-out.gro' )
+                except subprocess.CalledProcessError as e:
+                    print( 'GROMACS Error: ', job_directory , e.stderr)
+                    energy = 7777777
+                    atoms = read(start_xyz)   
+            """     
+            
+
+        elif geo_opt_para_line['method'] == 'GAMESS':
+            if 'input' in geo_opt_para_line:
+                if os.path.exists( geo_opt_para_line['input'] ): # If we provide absolute path
+                    gamess_input = geo_opt_para_line['input']
+                elif os.path.exists( os.path.join(current_directory, geo_opt_para_line['input']) ) :# Check job root path
+                    gamess_input = os.path.join(current_directory, geo_opt_para_line['input'])
+                else:
+                    raise ValueError('GAMESS input template is not found from key path')
+                # Read the GAMESS template and inject coordinates
+                with open(start_xyz, 'r') as f1:
+                    lines = f1.readlines()
+                    natoms = int( lines[0] )
+                    elements = [ line.split()[0] for line in lines[2:2+natoms] ]
+                    # GAMESS $DATA needs: element, nuclear charge, x, y, z
+                    atomic_numbers = { 'H':1.0, 'He':2.0, 'Li':3.0, 'Be':4.0, 'B':5.0, 'C':6.0,
+                                       'N':7.0, 'O':8.0, 'F':9.0, 'Ne':10.0, 'Na':11.0, 'Mg':12.0,
+                                       'Al':13.0, 'Si':14.0, 'P':15.0, 'S':16.0, 'Cl':17.0, 'Ar':18.0,
+                                       'K':19.0, 'Ca':20.0, 'Sc':21.0, 'Ti':22.0, 'V':23.0, 'Cr':24.0,
+                                       'Mn':25.0, 'Fe':26.0, 'Co':27.0, 'Ni':28.0, 'Cu':29.0, 'Zn':30.0,
+                                       'Ga':31.0, 'Ge':32.0, 'As':33.0, 'Se':34.0, 'Br':35.0, 'Kr':36.0,
+                                       'Rb':37.0, 'Sr':38.0, 'Y':39.0, 'Zr':40.0, 'Nb':41.0, 'Mo':42.0,
+                                       'Tc':43.0, 'Ru':44.0, 'Rh':45.0, 'Pd':46.0, 'Ag':47.0, 'Cd':48.0,
+                                       'In':49.0, 'Sn':50.0, 'Sb':51.0, 'Te':52.0, 'I':53.0, 'Xe':54.0,
+                                       'Cs':55.0, 'Ba':56.0, 'La':57.0, 'Ce':58.0,
+                                       'Pr':59.0, 'Nd':60.0, 'Pm':61.0, 'Sm':62.0,
+                                       'Eu':63.0, 'Gd':64.0, 'Au':79.0, 'Pt':78.0 }
+                    data_lines = []
+                    for line in lines[2:2+natoms]:
+                        parts = line.split()
+                        elem = parts[0]
+                        x, y, z = parts[1], parts[2], parts[3]
+                        znuc = atomic_numbers.get(elem, 0.0)
+                        data_lines.append(f' {elem}    {znuc:.1f}    {x}    {y}    {z}')
+                    content_xyz = '\n'.join(data_lines)
+
+                with open(gamess_input, 'r') as f2:
+                    content_gms = f2.read()
+                content_gms = content_gms.replace('{structure_info}', content_xyz)
+                with open('gamess_job.inp', 'w') as f3:
+                    f3.write(content_gms)
+
+                calculator_command_lines = calculator_command_lines.replace('{input_script}', 'gamess_job')
+                # Clean GAMESS scratch files from previous runs (GAMESS refuses to overwrite .dat files)
+                gamess_scratch_dir = os.path.expanduser('~/gamess/restart')
+                if os.path.isdir(gamess_scratch_dir):
+                    for ext in ['.dat', '.F05', '.F08', '.F10', '.trj', '.rst']:
+                        scratch_file = os.path.join(gamess_scratch_dir, f'gamess_job{ext}')
+                        if os.path.exists(scratch_file):
+                            os.remove(scratch_file)
+                try:
+                    subprocess.run(calculator_command_lines, shell=True, check=False, capture_output=True, text=True)
+                    energy = None
+                except:
+                    print( f' GAMESS failed. Check detail at {job_directory}. Moving on with a fake high energy.' )
+                    energy = 7777777
+                    atoms = read(start_xyz)
+
+                if energy is None: # calculation done successfully
+                    # Parse GAMESS .log for energy and final geometry
+                    log_file = 'job.log'
+                    if not os.path.exists(log_file):
+                        log_file = 'gamess_job.log'
+                    try:
+                        with open(log_file, 'r') as f4:
+                            log_lines = f4.readlines()
+                            energy_vals = []
+                            coord_blocks = []
+                            in_eq_coords = False
+                            coord_lines = []
+                            for line_idx, line in enumerate(log_lines):
+                                # Match GAMESS energy lines: "FINAL RHF ENERGY IS", "FINAL UHF ENERGY IS",
+                                # "FINAL ROHF ENERGY IS", "FINAL MCSCF ENERGY IS", etc.
+                                if 'FINAL' in line and 'ENERGY IS' in line:
+                                    parts_e = line.split()
+                                    for k, tok in enumerate(parts_e):
+                                        if tok == 'IS':
+                                            energy_vals.append( float(parts_e[k+1]) )
+                                            break
+                                # Parse equilibrium geometry from optimization
+                                if 'EQUILIBRIUM GEOMETRY LOCATED' in line:
+                                    in_eq_coords = False
+                                    coord_lines = []
+                                if in_eq_coords:
+                                    parts = line.split()
+                                    if len(parts) == 5:
+                                        try:
+                                            float(parts[1])  # nuclear charge
+                                            coord_lines.append(parts)
+                                        except ValueError:
+                                            pass
+                                    elif len(parts) == 0 and len(coord_lines) > 0:
+                                        coord_blocks.append(coord_lines[:])
+                                        coord_lines = []
+                                        in_eq_coords = False
+                                if 'COORDINATES OF ALL ATOMS ARE (ANGS)' in line:
+                                    in_eq_coords = True
+                                    coord_lines = []
+
+                            if len(coord_lines) > 0:
+                                coord_blocks.append(coord_lines[:])
+
+                        if len(energy_vals) > 0:
+                            energy = energy_vals[-1]  # last energy in Hartrees
+                        else:
+                            energy = 7777777
+
+                        if len(coord_blocks) > 0:
+                            last_coords = coord_blocks[-1]
+                            elems = [c[0] for c in last_coords]
+                            pos = np.array([[float(c[2]), float(c[3]), float(c[4])] for c in last_coords])
+                            atoms = Atoms(elems, positions=pos)
+                        else:
+                            atoms = read(start_xyz)
+
+                    except Exception:
+                        print( f' GAMESS output parsing failed at {job_directory}.' )
+                        energy = 7777777
+                        atoms = read(start_xyz)
+
+            else:
+                raise NameError('GAMESS input is not provided by input key geo_opt_para_line')
+
+        elif geo_opt_para_line['method'] == 'GAMESS_SF_CI':
+            # ============================================================
+            # SF-TDDFT Conical Intersection search mode
+            # Runs GAMESS with spin-flip TDDFT (ROHF triplet reference),
+            # parses the two lowest singlet target states (S0 and S1),
+            # and returns the Somaki cost function as "energy":
+            #   C = (E_S0 + E_S1)/2 + (E_S1 - E_S0)^2 / alpha
+            # ============================================================
+            if 'input' in geo_opt_para_line:
+                if os.path.exists( geo_opt_para_line['input'] ):
+                    gamess_input = geo_opt_para_line['input']
+                elif os.path.exists( os.path.join(current_directory, geo_opt_para_line['input']) ):
+                    gamess_input = os.path.join(current_directory, geo_opt_para_line['input'])
+                else:
+                    raise ValueError('GAMESS SF-TDDFT input template is not found from key path')
+
+                # Get alpha parameter for Somaki cost function
+                alpha = geo_opt_para_line.get('alpha', 0.02)  # Default 0.02 Ha
+                cost_type = geo_opt_para_line.get('cost_type', 'somaki')  # 'somaki', 'e_s0', 'e_s1'
+
+                # Read XYZ and build GAMESS $DATA block
+                with open(start_xyz, 'r') as f1:
+                    lines = f1.readlines()
+                    natoms = int( lines[0] )
+                    elements = [ line.split()[0] for line in lines[2:2+natoms] ]
+                    atomic_numbers = { 'H':1.0, 'He':2.0, 'Li':3.0, 'Be':4.0, 'B':5.0, 'C':6.0,
+                                       'N':7.0, 'O':8.0, 'F':9.0, 'Ne':10.0, 'Na':11.0, 'Mg':12.0,
+                                       'Al':13.0, 'Si':14.0, 'P':15.0, 'S':16.0, 'Cl':17.0, 'Ar':18.0,
+                                       'K':19.0, 'Ca':20.0, 'Sc':21.0, 'Ti':22.0, 'V':23.0, 'Cr':24.0,
+                                       'Mn':25.0, 'Fe':26.0, 'Co':27.0, 'Ni':28.0, 'Cu':29.0, 'Zn':30.0,
+                                       'Ga':31.0, 'Ge':32.0, 'As':33.0, 'Se':34.0, 'Br':35.0, 'Kr':36.0,
+                                       'Rb':37.0, 'Sr':38.0, 'Y':39.0, 'Zr':40.0, 'Nb':41.0, 'Mo':42.0,
+                                       'Tc':43.0, 'Ru':44.0, 'Rh':45.0, 'Pd':46.0, 'Ag':47.0, 'Cd':48.0,
+                                       'In':49.0, 'Sn':50.0, 'Sb':51.0, 'Te':52.0, 'I':53.0, 'Xe':54.0,
+                                       'Cs':55.0, 'Ba':56.0, 'La':57.0, 'Ce':58.0,
+                                       'Pr':59.0, 'Nd':60.0, 'Pm':61.0, 'Sm':62.0,
+                                       'Eu':63.0, 'Gd':64.0, 'Au':79.0, 'Pt':78.0 }
+                    data_lines = []
+                    for line in lines[2:2+natoms]:
+                        parts = line.split()
+                        elem = parts[0]
+                        x, y, z = parts[1], parts[2], parts[3]
+                        znuc = atomic_numbers.get(elem, 0.0)
+                        data_lines.append(f' {elem}    {znuc:.1f}    {x}    {y}    {z}')
+                    content_xyz = '\n'.join(data_lines)
+
+                with open(gamess_input, 'r') as f2:
+                    content_gms = f2.read()
+                content_gms = content_gms.replace('{structure_info}', content_xyz)
+                with open('gamess_job.inp', 'w') as f3:
+                    f3.write(content_gms)
+
+                calculator_command_lines = calculator_command_lines.replace('{input_script}', 'gamess_job')
+                # Clean GAMESS scratch files
+                gamess_scratch_dir = os.path.expanduser('~/gamess/restart')
+                if os.path.isdir(gamess_scratch_dir):
+                    for ext in ['.dat', '.F05', '.F08', '.F10', '.trj', '.rst']:
+                        scratch_file = os.path.join(gamess_scratch_dir, f'gamess_job{ext}')
+                        if os.path.exists(scratch_file):
+                            os.remove(scratch_file)
+                try:
+                    subprocess.run(calculator_command_lines, shell=True, check=False, capture_output=True, text=True)
+                    energy = None
+                except:
+                    print( f' GAMESS SF-TDDFT failed at {job_directory}. Moving on with a fake high energy.' )
+                    energy = 7777777
+                    atoms = read(start_xyz)
+
+                if energy is None:  # calculation completed
+                    log_file = 'job.log'
+                    if not os.path.exists(log_file):
+                        log_file = 'gamess_job.log'
+                    try:
+                        import re
+                        with open(log_file, 'r') as f4:
+                            log_lines = f4.readlines()
+
+                        # 1. Parse ROHF reference energy
+                        e_rohf = None
+                        for line in log_lines:
+                            if 'FINAL ROHF ENERGY IS' in line:
+                                parts_e = line.split()
+                                for k, tok in enumerate(parts_e):
+                                    if tok == 'IS':
+                                        e_rohf = float(parts_e[k+1])
+                                        break
+
+                        # 2. Parse SF-TDDFT summary table
+                        #    Format: "   N  A     -78.XXXXXXXX    X.XXX    S2"
+                        #    Keep only singlets (S^2 < 0.5)
+                        in_summary = False
+                        sf_abs = []
+                        for line in log_lines:
+                            if 'SUMMARY OF SPIN-FLIP RESULTS' in line or 'SUMMARY OF TDDFT RESULTS' in line:
+                                in_summary = True
+                                sf_abs = []
+                                continue
+                            if not in_summary:
+                                continue
+                            if '(REFERENCE STATE)' in line:
+                                continue
+                            if 'DONE WITH' in line or 'SELECTING' in line:
+                                in_summary = False
+                                continue
+                            parts = line.split()
+                            if len(parts) >= 5:
+                                try:
+                                    state_num = int(parts[0])
+                                    sym = parts[1]  # 'A'
+                                    abs_energy = float(parts[2])
+                                    exc_ev = float(parts[3])
+                                    s_squared = float(parts[4])
+                                    sf_abs.append((abs_energy, s_squared))
+                                except (ValueError, IndexError):
+                                    pass
+                        # Sort by energy, take two lowest
+                        sf_abs.sort(key=lambda x: x[0])
+
+                        if len(sf_abs) >= 2:
+
+                            e_s0 = sf_abs[0][0]  # Lowest state
+                            e_s1 = sf_abs[1][0]  # Second lowest state
+                            gap = e_s1 - e_s0  # in Hartree
+
+                            # Cost function based on cost_type
+                            if cost_type == 'e_s0':
+                                energy = e_s0
+                            elif cost_type == 'e_s1':
+                                energy = e_s1
+                            elif cost_type == 'somaki':
+                                energy = (e_s0 + e_s1) / 2.0 + gap**2 / alpha
+                            elif cost_type == 'mean':
+                                energy = (e_s0 + e_s1) / 2.0
+                            elif cost_type == 'gap':
+                                energy = gap
+                            elif cost_type == 's1_near_ci':
+                                energy = e_s1 + gap**2 / alpha
+                            else:
+                                energy = (e_s0 + e_s1) / 2.0 + gap**2 / alpha
+
+                            # Save detailed info for analysis
+                            with open('sf_ci_info.txt', 'w') as finfo:
+                                finfo.write(f'E_ROHF_ref = {e_rohf} Ha\n')
+                                finfo.write(f'E_S0 = {e_s0:.10f} Ha\n')
+                                finfo.write(f'E_S1 = {e_s1:.10f} Ha\n')
+                                finfo.write(f'Gap = {gap:.10f} Ha = {gap*27.2114:.6f} eV\n')
+                                finfo.write(f'Alpha = {alpha}\n')
+                                finfo.write(f'Cost_C = {energy:.10f} Ha\n')
+                                finfo.write(f'SF states (eV from ref): {sf_abs}\n')
+                        else:
+                            print(f' SF-TDDFT parsing incomplete at {job_directory}: '
+                                  f'ROHF={e_rohf}, n_states={len(sf_abs)}')
+                            energy = 7777777
+
+                        # Parse last geometry (no optimization, so use input geometry)
+                        coord_blocks = []
+                        in_coords = False
+                        coord_lines_tmp = []
+                        for line in log_lines:
+                            if in_coords:
+                                parts = line.split()
+                                if len(parts) == 5:
+                                    try:
+                                        float(parts[1])
+                                        coord_lines_tmp.append(parts)
+                                    except ValueError:
+                                        pass
+                                elif len(parts) == 0 and len(coord_lines_tmp) > 0:
+                                    coord_blocks.append(coord_lines_tmp[:])
+                                    coord_lines_tmp = []
+                                    in_coords = False
+                            if 'COORDINATES OF ALL ATOMS ARE (ANGS)' in line:
+                                in_coords = True
+                                coord_lines_tmp = []
+                        if len(coord_lines_tmp) > 0:
+                            coord_blocks.append(coord_lines_tmp[:])
+
+                        if len(coord_blocks) > 0:
+                            last_coords = coord_blocks[-1]
+                            elems = [c[0] for c in last_coords]
+                            pos = np.array([[float(c[2]), float(c[3]), float(c[4])] for c in last_coords])
+                            atoms = Atoms(elems, positions=pos)
+                        else:
+                            atoms = read(start_xyz)
+
+                    except Exception as e:
+                        print( f' GAMESS SF-TDDFT output parsing failed at {job_directory}: {e}' )
+                        energy = 7777777
+                        atoms = read(start_xyz)
+            else:
+                raise NameError('GAMESS SF-TDDFT input is not provided by input key geo_opt_para_line')
+
+        elif geo_opt_para_line['method'] == 'User':  # If a general way from user
+            subprocess.run(calculator_command_lines, shell=True, check=True, capture_output=True, text=True)
+            energy = subprocess.run(geo_opt_para_line['get_energy'], shell=True, check=True, capture_output=True, text=True) 
+            structure_file = subprocess.run(geo_opt_para_line['get_structure'], shell=True, check=True, capture_output=True, text=True) 
+            atoms = read(structure_file)
+        else:
+            raise ValueError('External calculation setting has wrong values:', calculator_command_lines, geo_opt_para_line )
+            
+        # Go back to the main folder
+        os.chdir(current_directory)
+        
+        return atoms, energy 
+    
+
+

@@ -1,0 +1,48 @@
+# ── Python ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+*.so
+
+# ── RANGE / GAMESS run artifacts (never commit search output) ──
+results_*/
+*.dat
+*.F05
+*.F08
+*.F10
+*.trj
+*.rst
+*.log
+*.out
+*.err
+slurm-*.out
+agent_*-*.out
+agent_*-*.err
+range_*-*.out
+range_*-*.err
+gamess_job.inp
+job.log
+
+# ── Large / generated data & models ──────────────────────
+*.chk
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.json.gz
+*.bin
+*.safetensors
+models/
+checkpoints/
+
+# ── Scratch / editor / OS ────────────────────────────────
+.ipynb_checkpoints/
+*.swp
+*~
+.DS_Store
+.vscode/
+.idea/

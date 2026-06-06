@@ -1,0 +1,207 @@
+======================================================================
+  AGENTIC CI SEARCH PIPELINE REPORT: ETHYLENE
+  Date: 2026-04-12 16:02:58
+  Platform: OLCF Frontier (AMD MI250X)
+======================================================================
+
+PIPELINE STAGES
+----------------------------------------
+  Stage 1: RANGE exploration (935 total SF-TDDFT calculations)
+    e_s0: 380 calculations
+    e_s1: 344 calculations
+    somaki: 211 calculations
+
+  Stage 2: Classification
+    S0 minimum: E = -78.365071 Ha, gap = 1.5584 eV
+    S1 minimum: E = -78.305401 Ha, gap = 0.9348 eV
+    CI candidate: gap = 0.0047 eV, E(S0) = -78.282861 Ha
+
+  Stage 2.5: GPR Interpolation & DBSCAN Clustering
+    e_s0: GPR R² = 1.0000
+    e_s0: barrierless MEP
+    e_s1: GPR R² = 1.0000
+    e_s1: barrierless MEP
+    somaki: GPR R² = 1.0000
+    somaki: barrierless MEP
+
+  Stage 3: LLM Assessment
+    [LLM not loaded - using rule-based fallback]
+
+  Stage 4: CONICAL Refinement
+    ci_somaki: gap = 0.000013 eV, E(S0) = -78.4129035670 Ha
+
+  Stage 4.5: Transition States (GPR-predicted)
+    cl0_cl1: forward barrier = 0.230 eV, reverse = 0.018 eV (GPR uncertainty: 0.0008 Ha)
+    cl0_cl3: forward barrier = 0.440 eV, reverse = 0.020 eV (GPR uncertainty: 0.0010 Ha)
+    cl1_cl3: forward barrier = 0.228 eV, reverse = 0.020 eV (GPR uncertainty: 0.0010 Ha)
+    cl2_cl3: forward barrier = 0.042 eV, reverse = 0.020 eV (GPR uncertainty: 0.0010 Ha)
+    cl0_cl6: forward barrier = 1.749 eV, reverse = 0.114 eV (GPR uncertainty: 0.0060 Ha)
+
+
+PHOTOCHEMICAL LANDSCAPE
+----------------------------------------
+  Vertical excitation estimate: 1.62 eV
+  S1 barrier to CI: 0.618 eV
+
+  Ground-state transition states:
+    cl0_cl1: 0.230 eV forward, 0.018 eV reverse
+    cl0_cl3: 0.440 eV forward, 0.020 eV reverse
+    cl1_cl3: 0.228 eV forward, 0.020 eV reverse
+    cl2_cl3: 0.042 eV forward, 0.020 eV reverse
+    cl0_cl6: 1.749 eV forward, 0.114 eV reverse
+
+  Total SF-TDDFT calculations: 935
+
+
+FULL LOG
+----------------------------------------
+[15:55:59] [INFO] ============================================================
+[15:55:59] [INFO] AGENTIC CI SEARCH PIPELINE: ETHYLENE
+[15:55:59] [INFO] ============================================================
+[15:55:59] [INFO] 
+=== STAGE 1: RANGE Exploration ===
+[15:55:59] [INFO] 
+Objective: e_s0 (Ground-state minimum (lowest E_S0))
+[15:55:59] [INFO]   e_s0: results_ethylene_e_s0/ already has 380 results, skipping
+[15:56:00] [INFO]   Parsed 380 valid SF-TDDFT results
+[15:56:00] [INFO] 
+Objective: e_s1 (Excited-state minimum (lowest E_S1))
+[15:56:00] [INFO]   e_s1: results_ethylene_e_s1/ already has 347 results, skipping
+[15:56:01] [INFO]   Parsed 344 valid SF-TDDFT results
+[15:56:01] [INFO] 
+Objective: somaki (Conical intersection (Somaki cost function))
+[15:56:01] [INFO]   somaki: results_ethylene_somaki/ already has 212 results, skipping
+[15:56:02] [INFO]   Parsed 211 valid SF-TDDFT results
+[15:56:02] [INFO] 
+=== STAGE 2: Classification ===
+[15:56:02] [INFO]   S0 minimum: E = -78.365071 Ha, gap = 1.5584 eV
+[15:56:02] [INFO]   S1 minimum: E = -78.305401 Ha, gap = 0.9348 eV
+[15:56:02] [INFO]   CI candidate: gap = 0.0047 eV, E(S0) = -78.282861 Ha
+[15:56:02] [INFO] 
+=== STAGE 2.5: GPR Interpolation & DBSCAN Clustering ===
+[15:56:02] [INFO]   e_s0: 380 geometries, 18 coordinates
+[15:56:05] [INFO]   e_s0: 216 structures with gap < 0.5 eV
+[15:56:05] [INFO]   e_s0: DBSCAN found 11 near-CI cluster(s), 166 outliers
+[15:56:05] [INFO]     CI cluster 0: 16 members, best gap = 0.0646 eV (compute_000379_round_50_ol_2_from_7_5_6_8)
+[15:56:05] [INFO]     CI cluster 1: 5 members, best gap = 0.0540 eV (compute_000292_round_38_em_0_from_2_0_8)
+[15:56:05] [INFO]     CI cluster 2: 3 members, best gap = 0.0206 eV (compute_000222_round_27_ol_1_from_4_1_9_5)
+[15:56:05] [INFO]     CI cluster 3: 11 members, best gap = 0.0511 eV (compute_000149_round_17_ol_0_from_8_1_3_5)
+[15:56:05] [INFO]     CI cluster 4: 2 members, best gap = 0.0302 eV (compute_000126_round_13_em_0_from_3_7_2)
+[15:56:05] [INFO]     CI cluster 5: 2 members, best gap = 0.4049 eV (compute_000119_round_12_em_0_from_0_5_1)
+[15:56:05] [INFO]     CI cluster 6: 2 members, best gap = 0.1990 eV (compute_000294_round_38_ol_0_from_6_8_9_5)
+[15:56:05] [INFO]     CI cluster 7: 3 members, best gap = 0.0827 eV (compute_000164_round_19_ol_2_from_9_6_1_2)
+[15:56:05] [INFO]     CI cluster 8: 2 members, best gap = 0.3585 eV (compute_000371_round_49_ol_1_from_0_8_9_7)
+[15:56:05] [INFO]     CI cluster 9: 2 members, best gap = 0.2132 eV (compute_000295_round_38_ol_1_from_0_8_2_7)
+[15:56:05] [INFO]     CI cluster 10: 2 members, best gap = 0.1586 eV (compute_000289_round_37_ol_2_from_8_5_7_9)
+[15:56:07] [INFO]   e_s0: GPR R² = 1.0000, kernel = 23.7**2 * RBF(length_scale=19)
+[15:56:07] [INFO]   e_s0: mean prediction uncertainty at CI candidates: 0.000930 Ha
+[15:56:07] [INFO]   e_s0: MEP estimate (S0 min -> CI):
+[15:56:07] [INFO]     Cost at S0 min: -77.024272 Ha
+[15:56:07] [INFO]     Cost at CI: -78.282176 Ha
+[15:56:07] [INFO]     Max cost along path: -77.024272 Ha
+[15:56:07] [INFO]     Barrierless path
+[15:56:07] [INFO]   e_s1: 344 geometries, 18 coordinates
+[15:56:07] [INFO]   e_s1: 118 structures with gap < 0.5 eV
+[15:56:07] [INFO]   e_s1: DBSCAN found 7 near-CI cluster(s), 99 outliers
+[15:56:07] [INFO]     CI cluster 0: 3 members, best gap = 0.0290 eV (compute_000266_round_32_em_3_from_5_8_0)
+[15:56:07] [INFO]     CI cluster 1: 5 members, best gap = 0.1431 eV (compute_000284_round_34_ol_0_from_7_6_8_3)
+[15:56:07] [INFO]     CI cluster 2: 2 members, best gap = 0.0766 eV (compute_000275_round_33_em_3_from_6_8_5)
+[15:56:07] [INFO]     CI cluster 3: 2 members, best gap = 0.0775 eV (compute_000054_round_1_ol_2_from_8_1_3_7)
+[15:56:07] [INFO]     CI cluster 4: 3 members, best gap = 0.0855 eV (compute_000154_round_17_em_2_from_0_4_1)
+[15:56:07] [INFO]     CI cluster 5: 2 members, best gap = 0.2920 eV (compute_000189_round_22_em_2_from_8_6_4)
+[15:56:07] [INFO]     CI cluster 6: 2 members, best gap = 0.3706 eV (compute_000200_round_23_em_2_from_1_8_0)
+[15:56:08] [INFO]   e_s1: GPR R² = 1.0000, kernel = 22.5**2 * RBF(length_scale=18.1)
+[15:56:08] [INFO]   e_s1: mean prediction uncertainty at CI candidates: 0.000990 Ha
+[15:56:08] [INFO]   e_s1: MEP estimate (S0 min -> CI):
+[15:56:08] [INFO]     Cost at S0 min: -77.027814 Ha
+[15:56:08] [INFO]     Cost at CI: -78.293301 Ha
+[15:56:08] [INFO]     Max cost along path: -77.027814 Ha
+[15:56:08] [INFO]     Barrierless path
+[15:56:09] [INFO]   somaki: 211 geometries, 18 coordinates
+[15:56:09] [INFO]   somaki: 118 structures with gap < 0.5 eV
+[15:56:09] [INFO]   somaki: DBSCAN found 5 near-CI cluster(s), 66 outliers
+[15:56:09] [INFO]     CI cluster 0: 42 members, best gap = 0.0150 eV (compute_000209_round_27_em_0_from_7_8_9)
+[15:56:09] [INFO]     CI cluster 1: 2 members, best gap = 0.0255 eV (compute_000121_round_12_ol_2_from_1_3_8_5)
+[15:56:09] [INFO]     CI cluster 2: 2 members, best gap = 0.0291 eV (compute_000125_round_13_ol_1_from_1_9_8_7)
+[15:56:09] [INFO]     CI cluster 3: 4 members, best gap = 0.0369 eV (compute_000167_round_20_ol_1_from_1_6_9_2)
+[15:56:09] [INFO]     CI cluster 4: 2 members, best gap = 0.0787 eV (compute_000184_round_23_ol_1_from_3_8_4_5)
+[15:56:09] [INFO]   somaki: GPR R² = 1.0000, kernel = 27.3**2 * RBF(length_scale=28.9)
+[15:56:09] [INFO]   somaki: mean prediction uncertainty at CI candidates: 0.000816 Ha
+[15:56:09] [INFO]   somaki: MEP estimate (S0 min -> CI):
+[15:56:09] [INFO]     Cost at S0 min: -78.115496 Ha
+[15:56:09] [INFO]     Cost at CI: -78.282766 Ha
+[15:56:09] [INFO]     Max cost along path: -78.115496 Ha
+[15:56:09] [INFO]     Barrierless path
+[15:56:09] [INFO] 
+=== STAGE 3: Agent Decision ===
+[15:56:09] [INFO] 
+LLM Assessment:
+[LLM not loaded - using rule-based fallback]
+[15:56:09] [INFO]   DECISION: Submit CONICAL (gap = 0.0047 eV < 0.1 eV)
+[15:56:09] [INFO]   FINDING: S1 minimum is distinct from CI (gap = 0.9348 eV)
+[15:56:09] [INFO] 
+=== STAGE 4: CONICAL Refinement ===
+[15:56:09] [INFO]   Using template: /ccs/home/fzahari/Programs/RANGE/examples/GAMESS_calc/input_gamess_sf_tddft_template
+[15:56:09] [INFO]   Running CONICAL refinement: /ccs/home/fzahari/Programs/RANGE/examples/GAMESS_calc/conical_ci_somaki/
+[16:02:55] [INFO]   CONICAL completed in 406s
+[16:02:55] [INFO]   CONICAL result: gap = 0.000013 eV, E(S0) = -78.4129035670 Ha
+[16:02:55] [INFO] 
+=== STAGE 4.5: Transition State Search ===
+[16:02:56] [INFO]   S0 basin DBSCAN: 9 basin(s), 310 outliers (from 380 geometries)
+[16:02:56] [INFO]     S0 basin 0: 32 members, E(S0) = -78.300893 Ha (compute_000271_round_34_ol_3_from_4_1_2_5)
+[16:02:56] [INFO]     S0 basin 1: 15 members, E(S0) = -78.293095 Ha (compute_000129_round_13_ol_2_from_6_5_2_1)
+[16:02:56] [INFO]     S0 basin 2: 3 members, E(S0) = -78.286255 Ha (compute_000111_round_10_ol_3_from_7_5_0_9)
+[16:02:56] [INFO]     S0 basin 3: 3 members, E(S0) = -78.285444 Ha (compute_000119_round_12_em_0_from_0_5_1)
+[16:02:56] [INFO]     S0 basin 4: 5 members, E(S0) = -78.284242 Ha (compute_000279_round_36_em_0_from_1_7_5)
+[16:02:56] [INFO]     S0 basin 5: 3 members, E(S0) = -78.282108 Ha (compute_000283_round_36_ol_2_from_2_7_8_0)
+[16:02:56] [INFO]     S0 basin 6: 3 members, E(S0) = -78.240839 Ha (compute_000309_round_40_ga_0_from_3_4)
+[16:02:56] [INFO]     S0 basin 7: 3 members, E(S0) = -78.238945 Ha (compute_000302_round_38_sc_9_from_GM)
+[16:02:56] [INFO]     S0 basin 8: 3 members, E(S0) = -78.236081 Ha (compute_000356_round_46_sc_6_from_GM)
+[16:02:56] [INFO]   Found 9 S0 minima basins -> searching for TSs
+[16:02:57] [INFO] 
+  Pairwise RMSD between 9 S0 minima:
+[16:02:57] [INFO]     Cl0-Cl1: RMSD = 0.86 A, barrier = 0.230/0.018 eV, GPR unc = 0.0008 Ha
+[16:02:58] [INFO]     Cl0-Cl2: RMSD = 1.23 A, barrier = 0.403/0.004 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl0-Cl3: RMSD = 0.94 A, barrier = 0.440/0.020 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl0-Cl4: RMSD = 0.63 A, barrier = 0.456/0.003 eV, GPR unc = 0.0008 Ha
+[16:02:58] [INFO]     Cl0-Cl5: RMSD = 0.43 A, barrier = 0.465/-0.046 eV, GPR unc = 0.0009 Ha
+[16:02:58] [INFO]     Cl0-Cl6: RMSD = 1.38 A, barrier = 1.749/0.114 eV, GPR unc = 0.0060 Ha
+[16:02:58] [INFO]     Cl0-Cl7: RMSD = 3.15 A, barrier = 1.685/-0.000 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl0-Cl8: RMSD = 3.11 A, barrier = 1.763/-0.001 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl1-Cl2: RMSD = 0.70 A, barrier = 0.190/0.004 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl1-Cl3: RMSD = 0.53 A, barrier = 0.228/0.020 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl1-Cl4: RMSD = 0.64 A, barrier = 0.244/0.003 eV, GPR unc = 0.0008 Ha
+[16:02:58] [INFO]     Cl1-Cl5: RMSD = 0.84 A, barrier = 0.253/-0.046 eV, GPR unc = 0.0009 Ha
+[16:02:58] [INFO]     Cl1-Cl6: RMSD = 1.60 A, barrier = 1.417/-0.005 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl1-Cl7: RMSD = 3.05 A, barrier = 1.473/-0.000 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl1-Cl8: RMSD = 3.13 A, barrier = 1.551/-0.001 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl2-Cl3: RMSD = 0.54 A, barrier = 0.042/0.020 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl2-Cl4: RMSD = 1.04 A, barrier = 0.058/0.003 eV, GPR unc = 0.0008 Ha
+[16:02:58] [INFO]     Cl2-Cl5: RMSD = 1.26 A, barrier = 0.067/-0.046 eV, GPR unc = 0.0009 Ha
+[16:02:58] [INFO]     Cl2-Cl6: RMSD = 1.82 A, barrier = 1.231/-0.005 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl2-Cl7: RMSD = 2.93 A, barrier = 1.287/-0.000 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl2-Cl8: RMSD = 3.13 A, barrier = 1.364/-0.001 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl3-Cl4: RMSD = 0.79 A, barrier = 0.036/0.003 eV, GPR unc = 0.0008 Ha
+[16:02:58] [INFO]     Cl3-Cl5: RMSD = 1.01 A, barrier = 0.045/-0.046 eV, GPR unc = 0.0009 Ha
+[16:02:58] [INFO]     Cl3-Cl6: RMSD = 1.64 A, barrier = 1.209/-0.005 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl3-Cl7: RMSD = 3.03 A, barrier = 1.265/-0.000 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl3-Cl8: RMSD = 3.17 A, barrier = 1.342/-0.001 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl4-Cl5: RMSD = 0.72 A, barrier = 0.012/-0.046 eV, GPR unc = 0.0009 Ha
+[16:02:58] [INFO]     Cl4-Cl6: RMSD = 1.43 A, barrier = 1.178/-0.003 eV, GPR unc = 0.0019 Ha
+[16:02:58] [INFO]     Cl4-Cl7: RMSD = 3.15 A, barrier = 1.232/-0.000 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl4-Cl8: RMSD = 3.10 A, barrier = 1.310/-0.001 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl5-Cl6: RMSD = 1.54 A, barrier = 1.118/-0.005 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl5-Cl7: RMSD = 3.13 A, barrier = 1.174/-0.000 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl5-Cl8: RMSD = 3.09 A, barrier = 1.252/-0.001 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl6-Cl7: RMSD = 4.22 A, barrier = 0.051/-0.000 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl6-Cl8: RMSD = 4.26 A, barrier = 0.129/-0.001 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO]     Cl7-Cl8: RMSD = 1.15 A, barrier = 0.077/-0.001 eV, GPR unc = 0.0010 Ha
+[16:02:58] [INFO] 
+  5 viable TS candidates (of 36 total pairs):
+[16:02:58] [INFO]     Rank 1: Cl0-Cl1 RMSD=0.86 A, barrier=0.230/0.018 eV -> /ccs/home/fzahari/Programs/RANGE/examples/GAMESS_calc/ts_candidate_cl0_cl1.xyz
+[16:02:58] [INFO]     Rank 2: Cl0-Cl3 RMSD=0.94 A, barrier=0.440/0.020 eV -> /ccs/home/fzahari/Programs/RANGE/examples/GAMESS_calc/ts_candidate_cl0_cl3.xyz
+[16:02:58] [INFO]     Rank 3: Cl1-Cl3 RMSD=0.53 A, barrier=0.228/0.020 eV -> /ccs/home/fzahari/Programs/RANGE/examples/GAMESS_calc/ts_candidate_cl1_cl3.xyz
+[16:02:58] [INFO]     Rank 4: Cl2-Cl3 RMSD=0.54 A, barrier=0.042/0.020 eV -> /ccs/home/fzahari/Programs/RANGE/examples/GAMESS_calc/ts_candidate_cl2_cl3.xyz
+[16:02:58] [INFO]     Rank 5: Cl0-Cl6 RMSD=1.38 A, barrier=1.749/0.114 eV -> /ccs/home/fzahari/Programs/RANGE/examples/GAMESS_calc/ts_candidate_cl0_cl6.xyz
+[16:02:58] [INFO] 
+=== STAGE 5: Report ===

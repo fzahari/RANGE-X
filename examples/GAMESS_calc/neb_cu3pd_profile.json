@@ -1,0 +1,28 @@
+Cu3Pd NEB array: basin #0 (-715.9042) -> basin #1 (-715.9233)
+  ΔE_reactant_to_product = -520 meV (energetically downhill)
+
+Image      Term         E(S0) Ha       rel meV    note
+----------------------------------------------------------------------
+  image_01  CONVERGED    -715.9010           +87   #
+  image_02  CONVERGED    -715.8986          +154   ###
+  image_03  CONVERGED    -715.8970          +196   ###
+  image_04  CONVERGED    -715.8964          +213   ####
+  image_05  CONVERGED    -715.8965          +208   ####
+  image_06  CONVERGED    -715.8974          +186   ###
+  image_07  CONVERGED    -715.8987          +150   ###
+  image_08  CONVERGED    -715.9004          +102   ##
+  image_09  CONVERGED    -715.9026           +44   
+  image_10  CONVERGED    -715.9050           -23   
+  image_11  CONVERGED    -715.9078           -97   <
+  image_12  CONVERGED    -715.9108          -181   <<<
+  image_13  CONVERGED    -715.9143          -275   <<<<<
+  image_14  CONVERGED    -715.9179          -372   <<<<<<<
+  image_15  CONVERGED    -715.9211          -460   <<<<<<<<<
+
+  reactant  (alpha=0.000)  -715.9042
+  product   (alpha=1.000)  -715.9233
+
+=== Highest-E image: image_04, E(S0) = -715.8964 Ha (alpha=0.250) ===
+
+** Profile has a BARRIER: forward = 213 meV, reverse = 733 meV **
+   image_04 is a viable TS guess for SADPNT (Step 3).

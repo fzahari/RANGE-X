@@ -1,0 +1,119 @@
+======================================================================
+  AGENTIC CI SEARCH PIPELINE REPORT: CE2_H2O
+  Date: 2026-04-12 15:59:48
+  Platform: OLCF Frontier (AMD MI250X)
+======================================================================
+
+PIPELINE STAGES
+----------------------------------------
+  Stage 1: RANGE exploration (245 total SF-TDDFT calculations)
+    e_s0: 85 calculations
+    e_s1: 80 calculations
+    somaki: 80 calculations
+
+  Stage 2: Classification
+    S0 minimum: E = -55.593359 Ha, gap = 0.5115 eV
+    S1 minimum: E = -55.616579 Ha, gap = 0.2934 eV
+    CI candidate: gap = 0.0048 eV, E(S0) = -55.425968 Ha
+
+  Stage 2.5: GPR Interpolation & DBSCAN Clustering
+    e_s0: GPR R² = 1.0000
+    e_s0: barrierless MEP
+    e_s1: GPR R² = 1.0000
+    e_s1: barrierless MEP
+    somaki: GPR R² = 1.0000
+    somaki: barrierless MEP
+
+  Stage 3: LLM Assessment
+    [LLM not loaded - using rule-based fallback]
+
+  Stage 4: CONICAL Refinement
+    ci_somaki: FAILED
+
+
+PHOTOCHEMICAL LANDSCAPE
+----------------------------------------
+  Vertical excitation estimate: -0.63 eV
+  S1 barrier to CI: 5.192 eV
+
+  Total SF-TDDFT calculations: 245
+
+
+FULL LOG
+----------------------------------------
+[15:59:34] [INFO] ============================================================
+[15:59:34] [INFO] AGENTIC CI SEARCH PIPELINE: CE2_H2O
+[15:59:34] [INFO] ============================================================
+[15:59:34] [INFO] 
+=== STAGE 1: RANGE Exploration ===
+[15:59:34] [INFO] 
+Objective: e_s0 (Ground-state minimum (lowest E_S0))
+[15:59:34] [INFO]   e_s0: results_ce2_h2o_e_s0/ already has 213 results, skipping
+[15:59:34] [INFO]   Parsed 85 valid SF-TDDFT results
+[15:59:34] [INFO] 
+Objective: e_s1 (Excited-state minimum (lowest E_S1))
+[15:59:34] [INFO]   e_s1: results_ce2_h2o_e_s1/ already has 197 results, skipping
+[15:59:34] [INFO]   Parsed 80 valid SF-TDDFT results
+[15:59:34] [INFO] 
+Objective: somaki (Conical intersection (Somaki cost function))
+[15:59:34] [INFO]   somaki: results_ce2_h2o_somaki/ already has 232 results, skipping
+[15:59:35] [INFO]   Parsed 80 valid SF-TDDFT results
+[15:59:35] [INFO] 
+=== STAGE 2: Classification ===
+[15:59:35] [INFO]   S0 minimum: E = -55.593359 Ha, gap = 0.5115 eV
+[15:59:35] [INFO]   S1 minimum: E = -55.616579 Ha, gap = 0.2934 eV
+[15:59:35] [INFO]   CI candidate: gap = 0.0048 eV, E(S0) = -55.425968 Ha
+[15:59:35] [INFO] 
+=== STAGE 2.5: GPR Interpolation & DBSCAN Clustering ===
+[15:59:35] [INFO]   e_s0: 85 geometries, 12 coordinates
+[15:59:38] [INFO]   e_s0: 37 structures with gap < 0.5 eV
+[15:59:38] [INFO]   e_s0: DBSCAN found 1 near-CI cluster(s), 35 outliers
+[15:59:38] [INFO]     CI cluster 0: 2 members, best gap = 0.0569 eV (compute_000065_round_3_ol_1_from_6_7_9_2)
+[15:59:38] [INFO]   e_s0: GPR R² = 1.0000, kernel = 25.3**2 * RBF(length_scale=17.2)
+[15:59:38] [INFO]   e_s0: mean prediction uncertainty at CI candidates: 0.001000 Ha
+[15:59:38] [INFO]   e_s0: MEP estimate (S0 min -> CI):
+[15:59:38] [INFO]     Cost at S0 min: -54.907021 Ha
+[15:59:38] [INFO]     Cost at CI: -55.500032 Ha
+[15:59:38] [INFO]     Max cost along path: -54.907021 Ha
+[15:59:38] [INFO]     Barrierless path
+[15:59:38] [INFO]   e_s1: 80 geometries, 12 coordinates
+[15:59:38] [INFO]   e_s1: 44 structures with gap < 0.5 eV
+[15:59:38] [INFO]   e_s1: DBSCAN found 2 near-CI cluster(s), 40 outliers
+[15:59:38] [INFO]     CI cluster 0: 2 members, best gap = 0.1307 eV (compute_000125_round_13_em_1_from_2_4_6)
+[15:59:38] [INFO]     CI cluster 1: 2 members, best gap = 0.0440 eV (compute_000138_round_15_ol_0_from_7_4_0_2)
+[15:59:38] [INFO]   e_s1: GPR R² = 1.0000, kernel = 24.8**2 * RBF(length_scale=16.3)
+[15:59:38] [INFO]   e_s1: mean prediction uncertainty at CI candidates: 0.000986 Ha
+[15:59:38] [INFO]   e_s1: MEP estimate (S0 min -> CI):
+[15:59:38] [INFO]     Cost at S0 min: -55.117083 Ha
+[15:59:38] [INFO]     Cost at CI: -55.492390 Ha
+[15:59:38] [INFO]     Max cost along path: -55.117083 Ha
+[15:59:38] [INFO]     Barrierless path
+[15:59:38] [INFO]   somaki: 80 geometries, 12 coordinates
+[15:59:38] [INFO]   somaki: 48 structures with gap < 0.5 eV
+[15:59:38] [INFO]   somaki: DBSCAN found 0 near-CI cluster(s), 48 outliers
+[15:59:38] [INFO]   somaki: GPR R² = 1.0000, kernel = 25**2 * RBF(length_scale=20.6)
+[15:59:38] [INFO]   somaki: mean prediction uncertainty at CI candidates: 0.001000 Ha
+[15:59:38] [INFO]   somaki: MEP estimate (S0 min -> CI):
+[15:59:38] [INFO]     Cost at S0 min: -55.067465 Ha
+[15:59:38] [INFO]     Cost at CI: -55.425876 Ha
+[15:59:38] [INFO]     Max cost along path: -55.067465 Ha
+[15:59:38] [INFO]     Barrierless path
+[15:59:38] [INFO] 
+=== STAGE 3: Agent Decision ===
+[15:59:38] [INFO] 
+LLM Assessment:
+[LLM not loaded - using rule-based fallback]
+[15:59:38] [INFO]   DECISION: Submit CONICAL (gap = 0.0048 eV < 0.1 eV)
+[15:59:38] [INFO]   FINDING: S1 minimum is distinct from CI (gap = 0.2934 eV)
+[15:59:38] [INFO] 
+=== STAGE 4: CONICAL Refinement ===
+[15:59:38] [INFO]   Using template: /ccs/home/fzahari/Programs/RANGE/examples/GAMESS_calc/input_gamess_ce2_h2o_sf_tddft_template
+[15:59:38] [INFO]   Running CONICAL refinement: /ccs/home/fzahari/Programs/RANGE/examples/GAMESS_calc/conical_ci_somaki/
+[15:59:48] [INFO]   CONICAL completed in 10s
+[15:59:48] [INFO] 
+=== STAGE 4.5: Transition State Search ===
+[15:59:48] [INFO]   S0 basin DBSCAN: 1 basin(s), 81 outliers (from 85 geometries)
+[15:59:48] [INFO]     S0 basin 0: 4 members, E(S0) = -55.526120 Ha (compute_000122_round_12_ol_0_from_1_0_3_8)
+[15:59:48] [INFO]   Only 1 S0 minimum basin found -> no TS search needed
+[15:59:48] [INFO] 
+=== STAGE 5: Report ===

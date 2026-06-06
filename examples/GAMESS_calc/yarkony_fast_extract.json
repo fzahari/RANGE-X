@@ -1,0 +1,282 @@
+{
+  "ethylene": {
+    "name": "C2H4",
+    "objectives": {
+      "e_s0": {
+        "dir": "results_ethylene_e_s0",
+        "N": 380,
+        "attempted": 380,
+        "conv_rate": 1.0,
+        "best_gap_meV": 3.701,
+        "min_E_S0_Ha": -78.3650712145,
+        "N_lt_50": 41,
+        "N_lt_300": 171
+      },
+      "e_s1": {
+        "dir": "results_ethylene_e_s1",
+        "N": 344,
+        "attempted": 347,
+        "conv_rate": 0.9913544668587896,
+        "best_gap_meV": 19.813000000000002,
+        "min_E_S0_Ha": -78.3397539873,
+        "N_lt_50": 6,
+        "N_lt_300": 84
+      },
+      "somaki": {
+        "dir": "results_ethylene_somaki",
+        "N": 211,
+        "attempted": 212,
+        "conv_rate": 0.9952830188679245,
+        "best_gap_meV": 4.732,
+        "min_E_S0_Ha": -78.3400176377,
+        "N_lt_50": 64,
+        "N_lt_300": 108
+      }
+    }
+  },
+  "cu3": {
+    "name": "Cu3",
+    "objectives": {
+      "e_s0": {
+        "dir": "results_cu3_e_s0",
+        "N": 112,
+        "attempted": 145,
+        "conv_rate": 0.7724137931034483,
+        "best_gap_meV": 5.78,
+        "min_E_S0_Ha": -588.7429194318,
+        "N_lt_50": 17,
+        "N_lt_300": 63
+      },
+      "e_s1": {
+        "dir": "results_cu3_benzene_e_s0,e_s1,somaki",
+        "N": 13,
+        "attempted": 20,
+        "conv_rate": 0.65,
+        "best_gap_meV": 60.504000000000005,
+        "min_E_S0_Ha": -625.9366349975,
+        "N_lt_50": 0,
+        "N_lt_300": 1
+      },
+      "somaki": {
+        "dir": "results_cu3_benzene_e_s0,e_s1,somaki",
+        "N": 13,
+        "attempted": 20,
+        "conv_rate": 0.65,
+        "best_gap_meV": 60.504000000000005,
+        "min_E_S0_Ha": -625.9366349975,
+        "N_lt_50": 0,
+        "N_lt_300": 1
+      }
+    }
+  },
+  "ag3": {
+    "name": "Ag3",
+    "objectives": {
+      "e_s0": {
+        "dir": "results_ag3_e_s0",
+        "N": 142,
+        "attempted": 142,
+        "conv_rate": 1.0,
+        "best_gap_meV": 11.715,
+        "min_E_S0_Ha": -438.5120499435,
+        "N_lt_50": 46,
+        "N_lt_300": 81
+      },
+      "e_s1": {
+        "dir": "results_ag3_e_s1",
+        "N": 140,
+        "attempted": 141,
+        "conv_rate": 0.9929078014184397,
+        "best_gap_meV": 16.823,
+        "min_E_S0_Ha": -438.5121918485,
+        "N_lt_50": 2,
+        "N_lt_300": 57
+      },
+      "somaki": {
+        "dir": "results_ag3_somaki",
+        "N": 141,
+        "attempted": 141,
+        "conv_rate": 1.0,
+        "best_gap_meV": 46.616,
+        "min_E_S0_Ha": -438.5119214279,
+        "N_lt_50": 1,
+        "N_lt_300": 81
+      }
+    }
+  },
+  "au3": {
+    "name": "Au3",
+    "objectives": {
+      "e_s0": {
+        "dir": "results_au3_e_s0",
+        "N": 133,
+        "attempted": 138,
+        "conv_rate": 0.9637681159420289,
+        "best_gap_meV": 1.486,
+        "min_E_S0_Ha": -407.8434162022,
+        "N_lt_50": 27,
+        "N_lt_300": 67
+      },
+      "e_s1": {
+        "dir": "results_au3_e_s1",
+        "N": 138,
+        "attempted": 138,
+        "conv_rate": 1.0,
+        "best_gap_meV": 15.221,
+        "min_E_S0_Ha": -407.8432283321,
+        "N_lt_50": 4,
+        "N_lt_300": 45
+      },
+      "somaki": {
+        "dir": "results_au3_somaki",
+        "N": 140,
+        "attempted": 141,
+        "conv_rate": 0.9929078014184397,
+        "best_gap_meV": 28.171000000000003,
+        "min_E_S0_Ha": -407.8436626399,
+        "N_lt_50": 4,
+        "N_lt_300": 59
+      }
+    }
+  },
+  "cu3pd": {
+    "name": "Cu3Pd",
+    "objectives": {
+      "e_s0": {
+        "dir": "results_cu3pd_e_s0",
+        "N": 157,
+        "attempted": 222,
+        "conv_rate": 0.7072072072072072,
+        "best_gap_meV": 5.066,
+        "min_E_S0_Ha": -715.9232518156,
+        "N_lt_50": 5,
+        "N_lt_300": 54
+      },
+      "e_s1": {
+        "dir": "results_cu3pd_e_s1",
+        "N": 161,
+        "attempted": 219,
+        "conv_rate": 0.7351598173515982,
+        "best_gap_meV": 8.745,
+        "min_E_S0_Ha": -715.9476642821,
+        "N_lt_50": 9,
+        "N_lt_300": 68
+      },
+      "somaki": {
+        "dir": "results_cu3pd_somaki",
+        "N": 149,
+        "attempted": 216,
+        "conv_rate": 0.6898148148148148,
+        "best_gap_meV": 6.36,
+        "min_E_S0_Ha": -715.9298485606,
+        "N_lt_50": 9,
+        "N_lt_300": 61
+      }
+    }
+  },
+  "cu3_benzene": {
+    "name": "Cu3/benzene",
+    "objectives": {
+      "e_s0": {
+        "dir": "results_cu3_benzene_e_s0,e_s1,somaki",
+        "N": 13,
+        "attempted": 20,
+        "conv_rate": 0.65,
+        "best_gap_meV": 60.504000000000005,
+        "min_E_S0_Ha": -625.9366349975,
+        "N_lt_50": 0,
+        "N_lt_300": 1
+      },
+      "e_s1": {
+        "dir": "results_cu3_benzene_e_s0,e_s1,somaki",
+        "N": 13,
+        "attempted": 20,
+        "conv_rate": 0.65,
+        "best_gap_meV": 60.504000000000005,
+        "min_E_S0_Ha": -625.9366349975,
+        "N_lt_50": 0,
+        "N_lt_300": 1
+      },
+      "somaki": {
+        "dir": "results_cu3_benzene_e_s0,e_s1,somaki",
+        "N": 13,
+        "attempted": 20,
+        "conv_rate": 0.65,
+        "best_gap_meV": 60.504000000000005,
+        "min_E_S0_Ha": -625.9366349975,
+        "N_lt_50": 0,
+        "N_lt_300": 1
+      }
+    }
+  },
+  "ceo": {
+    "name": "CeO",
+    "objectives": {
+      "e_s0": {
+        "dir": "results_ceo_e_s0",
+        "N": 21,
+        "attempted": 346,
+        "conv_rate": 0.06069364161849711,
+        "best_gap_meV": 176.24699999999999,
+        "min_E_S0_Ha": -54.5856823256,
+        "N_lt_50": 0,
+        "N_lt_300": 2
+      },
+      "e_s1": {
+        "dir": "results_ceo_e_s1",
+        "N": 13,
+        "attempted": 364,
+        "conv_rate": 0.03571428571428571,
+        "best_gap_meV": 42.545,
+        "min_E_S0_Ha": -54.6476264792,
+        "N_lt_50": 1,
+        "N_lt_300": 2
+      },
+      "somaki": {
+        "dir": "results_ceo_somaki",
+        "N": 19,
+        "attempted": 364,
+        "conv_rate": 0.0521978021978022,
+        "best_gap_meV": 59.275,
+        "min_E_S0_Ha": -54.8015902584,
+        "N_lt_50": 0,
+        "N_lt_300": 4
+      }
+    }
+  },
+  "ce2_h2o": {
+    "name": "Ce2(H2O)",
+    "objectives": {
+      "e_s0": {
+        "dir": "results_ce2_h2o_e_s0",
+        "N": 85,
+        "attempted": 213,
+        "conv_rate": 0.39906103286384975,
+        "best_gap_meV": 56.936,
+        "min_E_S0_Ha": -55.5933591329,
+        "N_lt_50": 0,
+        "N_lt_300": 24
+      },
+      "e_s1": {
+        "dir": "results_ce2_h2o_e_s1",
+        "N": 80,
+        "attempted": 197,
+        "conv_rate": 0.40609137055837563,
+        "best_gap_meV": 29.598,
+        "min_E_S0_Ha": -55.6273633406,
+        "N_lt_50": 3,
+        "N_lt_300": 32
+      },
+      "somaki": {
+        "dir": "results_ce2_h2o_somaki",
+        "N": 80,
+        "attempted": 232,
+        "conv_rate": 0.3448275862068966,
+        "best_gap_meV": 4.764,
+        "min_E_S0_Ha": -55.5942982217,
+        "N_lt_50": 2,
+        "N_lt_300": 29
+      }
+    }
+  }
+}

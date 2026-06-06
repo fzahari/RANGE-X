@@ -1,0 +1,33 @@
+ $CONTRL SCFTYP=ROHF RUNTYP=ENERGY TDDFT=SPNFLP
+         DFTTYP=BHHLYP ISPHER=1 PP=READ MULT=4 MAXIT=200 ICHARG=0 $END
+ $SYSTEM MWORDS=400 MEMDDI=200 $END
+ $BASIS  BASNAM(1)=cu,cu,cu,
+                   c,c,c,c,c,c,
+                   h,h,h,h,h,h $END
+ $SCF    DAMP=.TRUE. SHIFT=.TRUE. DIIS=.TRUE. SOSCF=.FALSE. $END
+ $TDDFT  NSTATE=5 TAMMD=.TRUE. MULT=2 $END
+ $cu     GBASIS=SBKJC $END
+ $c      GBASIS=N31 NGAUSS=6 NDFUNC=1 $END
+ $h      GBASIS=N31 NGAUSS=6 $END
+ $ECP
+Cu-ecp SBKJC
+Cu-ecp SBKJC
+Cu-ecp SBKJC
+C-ecp none
+C-ecp none
+C-ecp none
+C-ecp none
+C-ecp none
+C-ecp none
+H-ecp none
+H-ecp none
+H-ecp none
+H-ecp none
+H-ecp none
+H-ecp none
+ $END
+ $DATA
+RANGE SF-TDDFT CI search Cu3/benzene
+C1
+{structure_info}
+ $END

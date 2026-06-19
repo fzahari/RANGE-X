@@ -19,8 +19,8 @@ It is the implementation used in:
   - `e_s1  = E₁`                              → excited-state minima
   - `somaki = ½(E₀+E₁) + (E₁−E₀)³/α`          → conical-intersection funnels
 - `examples/GAMESS_calc/` — per-system templates (`input_gamess_<sys>_sf_tddft_template`),
-  drivers (`inbox_<sys>_sf_ci.py`), and the orchestration script `agent_ci_pipeline.py`
-  (RANGE search → GPR + DBSCAN → optional CONICAL refinement → NEB validation).
+  drivers (`inbox_<sys>_sf_ci.py`), and a post-processing screener `screen_ci_candidates.py`
+  (GPR + DBSCAN clustering of the RANGE search output into distinct CI candidates).
 
 ## Installation
 

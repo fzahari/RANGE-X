@@ -25,14 +25,6 @@ Cu (Z=29), C (Z=6), and H (Z=1) are already in the element mapping in
 set up, and C/H have been there since ethylene. Unlike Cu3Pd (which
 required a Pd=46 patch), no modifications to RANGE are needed.
 
-### Agent pipeline support
-
-The SLURM scripts invoke `agent_ci_pipeline.py --molecule cu3_benzene`.
-If the agent pipeline does not recognize the `cu3_benzene` molecule name
-yet, add it to the molecule lookup in `agent_ci_pipeline.py` (same
-pattern as `cu3pd`, `ag3`, `cu3`, `au3`, etc.) -- it should just need a
-one-line entry pointing to `inbox_cu3_benzene_sf_ci.py`.
-
 ### Cu3/benzene Setup
 
 | Property | Value |
@@ -95,9 +87,7 @@ If SCF fails to converge:
 
 ```bash
 cd ~/Programs/RANGE/examples/GAMESS_calc
-for obj in e_s0 e_s1 somaki; do
-    sbatch run_cu3_benzene_${obj}.sh
-done
+sbatch run_cu3_benzene_e_s0.sh   # for e_s1 / somaki, point the script at the matching inbox_cu3_benzene_<obj>.py driver
 ```
 
 ### Search Space
@@ -120,9 +110,9 @@ This system is larger than Cu3Pd (15 atoms vs 4, 99 valence e- vs 75).
 Per-evaluation runtime will be significantly longer. RANGE will likely
 not finish a full 50-iteration optimization within one 2-hour window.
 
-The agent pipeline skips geometries that already have `sf_ci_info.txt`
-files, so resubmitting the same job picks up where the previous one
-stopped. If needed: `sbatch run_cu3_benzene_e_s0.sh` 2-3 times.
+Restart from the accumulated `structure_pool.db` (set `restart_from_pool`
+in the driver) to continue the search across multiple 2-hour windows.
+If needed, resubmit `run_cu3_benzene_e_s0.sh` 2-3 times.
 
 ### Science Question
 

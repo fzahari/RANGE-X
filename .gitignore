@@ -20,8 +20,6 @@ results_*/
 *.out
 *.err
 slurm-*.out
-agent_*-*.out
-agent_*-*.err
 range_*-*.out
 range_*-*.err
 gamess_job.inp
@@ -38,6 +36,17 @@ job.log
 *.safetensors
 models/
 checkpoints/
+
+# ── Run scratch / generated artifacts (keep examples/ clean) ──
+*.bak
+*.bak_*
+*.bak[0-9]
+structure_pool.db
+*_aggregated.json
+*_basins.json
+*_gpr_summary.json
+*candidate_*.xyz
+frontier_code_bundle.tar.gz
 
 # ── Scratch / editor / OS ────────────────────────────────
 .ipynb_checkpoints/
